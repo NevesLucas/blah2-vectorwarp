@@ -156,9 +156,10 @@ def build(args):
     shutil.copytree(trees['rtlsdr'], driver)
     apply_patch(driver, PATCHES[1])
     for test in ('convergence_oracle_test.py', 'tcp_data_send_test.py',
-                 'tcp_data_backpressure_test.py', 'watchdog_oracle_test.py'):
+                 'tcp_data_backpressure_test.py', 'socket_lifecycle_test.py',
+                 'watchdog_oracle_test.py'):
         run([sys.executable, ROOT / 'test/macos/kraken' / test, '--source', native])
-    for test in ('control_reader_test.py', 'driver_events_test.py'):
+    for test in ('control_reader_test.py', 'driver_events_test.py', 'shutdown_process_test.py'):
         run([sys.executable, ROOT / 'test/macos/kraken' / test, '-v'])
     flags = ['-DCMAKE_BUILD_TYPE=Release', '-DINSTALL_UDEV_RULES=OFF',
              '-DDETACH_KERNEL_DRIVER=OFF', '-DWITH_RPC=OFF']

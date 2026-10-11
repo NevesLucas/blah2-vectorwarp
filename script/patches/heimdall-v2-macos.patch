@@ -1068,7 +1068,7 @@ index 21b3333..062c747 100644
 \ No newline at end of file
 +}
 diff --git a/heimdall_v2/src/net/rtl_tcp_server.cpp b/heimdall_v2/src/net/rtl_tcp_server.cpp
-index d2afc3a..7e4a236 100644
+index d2afc3a..8fe8730 100644
 --- a/heimdall_v2/src/net/rtl_tcp_server.cpp
 +++ b/heimdall_v2/src/net/rtl_tcp_server.cpp
 @@ -1,4 +1,7 @@
@@ -1079,33 +1079,347 @@ index d2afc3a..7e4a236 100644
  #include "tcp_common.hpp"  // For socket headers and utilities
  #include "../sdr/sdr_device.hpp"  // Need full SDRDevice definition
  #include "../core/config.hpp"
-@@ -48,8 +51,8 @@ bool RtlTcpServer::start() {
-     
+@@ -40,51 +43,49 @@ int RtlTcpServer::get_source_channel() const {
+ }
+ 
+ bool RtlTcpServer::start() {
+-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+-    if (server_socket < 0) return false;
+-    
+-    int opt = 1;
+-    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+-    
++    if (server_thread.joinable() || server_socket >= 0) return false;
++    // Publish only a fully configured listener. Failed starts own and close
++    // their local fd; stop()/the destructor must never close a reused number.
++    const int listener = socket(AF_INET, SOCK_STREAM, 0);
++    if (listener < 0) return false;
++    auto fail = [&]() { close(listener); return false; };
++    if (listener >= FD_SETSIZE || !set_socket_reuse(listener) ||
++        !set_socket_nonblocking(listener)) return fail();
++
      sockaddr_in addr{};
      addr.sin_family = AF_INET;
 -    addr.sin_addr.s_addr = INADDR_ANY;
 -    addr.sin_port = htons(RTL_TCP_PORT);
-+    if (inet_pton(AF_INET, heimdall_bind_host.c_str(), &addr.sin_addr) != 1) { close(server_socket); return false; }
+-    
+-    if (bind(server_socket, (sockaddr*)&addr, sizeof(addr)) < 0 || listen(server_socket, 1) < 0) {
+-        close(server_socket);
+-        server_socket = -1;  // stop() (the destructor) must not close the number again
+-        return false;
++    if (inet_pton(AF_INET, heimdall_bind_host.c_str(), &addr.sin_addr) != 1) return fail();
 +    addr.sin_port = htons(rtl_tcp_port);
-     
-     if (bind(server_socket, (sockaddr*)&addr, sizeof(addr)) < 0 || listen(server_socket, 1) < 0) {
-         close(server_socket);
-@@ -59,7 +62,7 @@ bool RtlTcpServer::start() {
-     
-     server_thread = std::thread(&RtlTcpServer::server_loop, this);
-     
++    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) < 0 ||
++        listen(listener, 1) < 0) return fail();
++
++    server_socket = listener;
++    running = true;
++    try {
++        server_thread = std::thread(&RtlTcpServer::server_loop, this);
++    } catch (...) {
++        running = false;
++        server_socket = -1;
++        return fail();
+     }
+-    
+-    server_thread = std::thread(&RtlTcpServer::server_loop, this);
+-    
 -    std::cout << "RTL-TCP Server listening on port " << RTL_TCP_PORT 
-+    std::cout << "RTL-TCP Server listening on port " << rtl_tcp_port
-          << " (streaming channel " << rtl_tcp_channel.load() << ")" << std::endl;
+-         << " (streaming channel " << rtl_tcp_channel.load() << ")" << std::endl;
++    std::cout << "RTL-TCP Server listening on port " << rtl_tcp_port << std::endl;
      return true;
  }
-@@ -345,4 +348,4 @@ void RtlTcpServer::clear_buffers() {
+ 
+ void RtlTcpServer::stop() {
+     running = false;
++    buffer_cv.notify_all();
++    // server_loop alone joins its worker and closes its client. Neither fd
++    // may be closed/reassigned while a select/send still references it.
++    if (server_thread.joinable()) server_thread.join();
+     if (server_socket >= 0) {
+-        shutdown(server_socket, SHUT_RDWR);  // wakes the accept(); close() alone doesn't
+         close(server_socket);
+         server_socket = -1;
+     }
+-    if (client_socket >= 0) {
+-        close(client_socket);
+-        client_socket = -1;
+-    }
+-    
+-    buffer_cv.notify_all();
+-    
+-    if (server_thread.joinable()) server_thread.join();
+-    if (worker_thread.joinable()) worker_thread.join();
+-    
+     clear_buffers();
+ }
+ 
+-void RtlTcpServer::send_dongle_info() {
++bool RtlTcpServer::send_dongle_info(int client_fd) {
+     // Send proper RTL-TCP dongle info header (12 bytes)
+     uint8_t rtl_tcp_header[12];
+     memcpy(rtl_tcp_header, "RTL0", 4);  // Magic
+@@ -99,11 +100,12 @@ void RtlTcpServer::send_dongle_info() {
+     uint32_t gain_count = htonl(29);
+     memcpy(rtl_tcp_header + 8, &gain_count, 4);
+     
+-    send(client_socket, rtl_tcp_header, 12, MSG_NOSIGNAL);
++    return send_packet_with_deadline(client_fd, rtl_tcp_header, sizeof(rtl_tcp_header),
++                                     std::chrono::milliseconds(250)).complete;
+ }
+ 
+ void RtlTcpServer::broadcast_data(const std::vector<ComplexBuffer>& channel_data) {
+-    if (client_socket < 0 || channel_data.empty()) return;
++    if (!running || client_socket.load() < 0 || channel_data.empty()) return;
+     
+     int current_source = rtl_tcp_channel.load();
+     if (current_source < 0 || static_cast<size_t>(current_source) >= channel_data.size()) {
+@@ -136,52 +138,52 @@ void RtlTcpServer::broadcast_data(const std::vector<ComplexBuffer>& channel_data
+ }
+ 
+ void RtlTcpServer::server_loop() {
++    const int listener = server_socket;  // immutable until this thread joins
++    if (listener < 0 || listener >= FD_SETSIZE) return;
+     while (running) {
+-        std::cout << "RTL-TCP: Waiting for client connection..." << std::endl;
+-        
++        fd_set read_fds;
++        FD_ZERO(&read_fds);
++        FD_SET(listener, &read_fds);
++        timeval timeout{0, 100000};
++        const int ready = select(listener + 1, &read_fds, nullptr, nullptr, &timeout);
++        if (!running) break;
++        if (ready < 0 && errno != EINTR) break;
++        if (ready <= 0 || !FD_ISSET(listener, &read_fds)) continue;
++
+         sockaddr_in client_addr{};
+         socklen_t addr_len = sizeof(client_addr);
+-        client_socket = accept(server_socket, (sockaddr*)&client_addr, &addr_len);
+-        
+-        if (client_socket < 0) {
+-            if (running) {
+-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+-            }
++        const int accepted = accept(listener, (sockaddr*)&client_addr, &addr_len);
++        if (accepted < 0) continue;
++        if (!running || accepted >= FD_SETSIZE || !set_socket_nonblocking(accepted)) {
++            close(accepted);
+             continue;
+         }
+-        
+-        // Keepalive: a client that vanished without a FIN (powered off, Wi-Fi
+-        // dropped) held the single slot until the kernel gave up on the
+-        // send - 15-30 min. Now it's found within ~25 s.
+-        {
+-            int on = 1, idle = 10, intvl = 5, cnt = 3;
+-            setsockopt(client_socket, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+-            setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+-            setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+-            setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+-        }
++#if defined(__APPLE__)
++        int no_sigpipe = 1;
++        setsockopt(accepted, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
++#endif
++        // Keepalive detects vanished clients without waiting for TCP's long
++        // default timeout. All writes remain nonblocking for bounded stop().
++        int on = 1, idle = 10, intvl = 5, cnt = 3;
++        setsockopt(accepted, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
++        setsockopt(accepted, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
++        setsockopt(accepted, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
++        setsockopt(accepted, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+         ignored_cmds_logged = 0;
+         cmd_carry_len = 0;
++        client_socket.store(accepted);
++        std::cout << "RTL-TCP: Client connected from " << inet_ntoa(client_addr.sin_addr)
++                  << ":" << ntohs(client_addr.sin_port)
++                  << " (streaming channel " << rtl_tcp_channel.load() << ")" << std::endl;
+ 
+-        std::cout << "RTL-TCP: Client connected from " << inet_ntoa(client_addr.sin_addr) 
+-             << ":" << ntohs(client_addr.sin_port) 
+-             << " (streaming channel " << rtl_tcp_channel.load() << ")" << std::endl;
+-        
+-        // Send dongle info immediately
+-        send_dongle_info();
+-        
+-        // Start worker thread for this client
+-        worker_thread = std::thread(&RtlTcpServer::worker_loop, this);
+-        
+-        // Wait for worker to finish (client disconnected)
+-        if (worker_thread.joinable()) {
++        if (send_dongle_info(accepted) && running) {
++            worker_thread = std::thread(&RtlTcpServer::worker_loop, this, accepted);
+             worker_thread.join();
+         }
+-        
+-        close(client_socket);
+-        client_socket = -1;
++        // Sole close owner: stop() never changes the number seen by the worker.
++        client_socket.store(-1);
++        close(accepted);
+         clear_buffers();
+-        
+         std::cout << "RTL-TCP: Client disconnected" << std::endl;
+     }
+ }
+@@ -192,12 +194,12 @@ void RtlTcpServer::server_loop() {
+ // send their own on connect - applying them would retune the whole DF array
+ // and force a recalibration. So they're read (a client's close is noticed
+ // here, instead of only by a failed send) and logged once per type.
+-bool RtlTcpServer::read_client_commands() {
++bool RtlTcpServer::read_client_commands(int client_fd) {
+     // Bounded: a client flooding commands mustn't starve its own stream
+     for (int reads = 0; reads < 8; reads++) {
+         uint8_t buf[5 + 510];  // carry-over + a whole number of commands
+         std::memcpy(buf, cmd_carry, cmd_carry_len);
+-        const ssize_t n = recv(client_socket, buf + cmd_carry_len, 510, MSG_DONTWAIT);
++        const ssize_t n = recv(client_fd, buf + cmd_carry_len, 510, MSG_DONTWAIT);
+         if (n == 0) return false;  // orderly close
+         if (n < 0) return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+         const size_t total = cmd_carry_len + static_cast<size_t>(n);
+@@ -225,12 +227,13 @@ bool RtlTcpServer::read_client_commands() {
+     return true;  // still connected; the rest is read on the next call
+ }
+ 
+-void RtlTcpServer::worker_loop() {
++void RtlTcpServer::worker_loop(int client_fd) {
++    if (client_fd < 0 || client_fd >= FD_SETSIZE) return;
+     fd_set writefds;
+     timeval tv;
+     
+-    while (running && client_socket >= 0) {
+-        if (!read_client_commands()) {
++    while (running) {
++        if (!read_client_commands(client_fd)) {
+             std::cout << "RTL-TCP: client closed the connection" << std::endl;
+             return;
+         }
+@@ -240,12 +243,9 @@ void RtlTcpServer::worker_loop() {
+         // Wait for data (like original rtl_tcp.c)
+         {
+             std::unique_lock<std::mutex> lock(buffer_mutex);
+-            if (!buffer_head) {
+-                if (buffer_cv.wait_for(lock, std::chrono::seconds(1)) == std::cv_status::timeout) {
+-                    continue;
+-                }
+-            }
+-            
++            buffer_cv.wait_for(lock, std::chrono::seconds(1),
++                               [&] { return !running || buffer_head != nullptr; });
++            if (!running) break;
+             if (buffer_head) {
+                 current_buffer = buffer_head;
+                 buffer_head = buffer_head->next;
+@@ -263,19 +263,28 @@ void RtlTcpServer::worker_loop() {
+         size_t index = 0;
+         auto last_progress = std::chrono::steady_clock::now();
+         
+-        while (bytes_left > 0 && running && client_socket >= 0) {
++        while (bytes_left > 0 && running) {
++            // Also bound repeated transient sends after spurious readiness.
++            if (std::chrono::steady_clock::now() - last_progress > std::chrono::seconds(10)) {
++                std::cout << "RTL-TCP: client stopped reading for 10 s, disconnecting" << std::endl;
++                delete current_buffer;
++                return;
++            }
+             // Use select to check if socket is ready for writing
+             FD_ZERO(&writefds);
+-            FD_SET(client_socket, &writefds);
++            FD_SET(client_fd, &writefds);
+             tv.tv_sec = 1;
+             tv.tv_usec = 0;
+             
+-            int r = select(client_socket + 1, nullptr, &writefds, nullptr, &tv);
+-            if (r > 0 && FD_ISSET(client_socket, &writefds)) {
+-                ssize_t bytes_sent = send(client_socket, 
++            int r = select(client_fd + 1, nullptr, &writefds, nullptr, &tv);
++            if (!running) break;
++            if (r < 0 && errno == EINTR) continue;
++            if (r > 0 && FD_ISSET(client_fd, &writefds)) {
++                ssize_t bytes_sent = send(client_fd,
+                                         current_buffer->data.data() + index, 
+                                         bytes_left, MSG_NOSIGNAL);
+                 
++                if (bytes_sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
+                 if (bytes_sent <= 0) {
+                     std::cout << "RTL-TCP: Send failed, client disconnected" << std::endl;
+                     delete current_buffer;
+@@ -286,15 +295,7 @@ void RtlTcpServer::worker_loop() {
+                 index += bytes_sent;
+                 last_progress = std::chrono::steady_clock::now();
+             } else if (r == 0) {
+-                // Timeout - keep trying a while (don't disconnect immediately
+-                // like the original), but a client that hasn't read anything
+-                // for 10 s is gone or wedged: free the single slot
+-                if (std::chrono::steady_clock::now() - last_progress > std::chrono::seconds(10)) {
+-                    std::cout << "RTL-TCP: client stopped reading for 10 s, disconnecting" << std::endl;
+-                    delete current_buffer;
+-                    return;
+-                }
+-                continue;
++                continue;  // bounded by last_progress at the top of the loop
+             } else {
+                 // Error
+                 std::cout << "RTL-TCP: Select error, client disconnected" << std::endl;
+@@ -312,6 +313,11 @@ void RtlTcpServer::add_to_buffer(const uint8_t* data, size_t len) {
+     
+     std::lock_guard<std::mutex> lock(buffer_mutex);
+     
++    if (!running || client_socket.load() < 0) {
++        delete new_node;
++        return;
++    }
++
+     // If buffer is full, drop oldest (like original rtl_tcp.c)
+     if (buffer_count >= MAX_BUFFER_COUNT && buffer_head) {
+         auto* old_head = buffer_head;
+@@ -345,4 +351,4 @@ void RtlTcpServer::clear_buffers() {
      }
      buffer_tail = nullptr;
      buffer_count = 0;
 -}
 \ No newline at end of file
 +}
+diff --git a/heimdall_v2/src/net/rtl_tcp_server.hpp b/heimdall_v2/src/net/rtl_tcp_server.hpp
+index 928e84e..0902584 100644
+--- a/heimdall_v2/src/net/rtl_tcp_server.hpp
++++ b/heimdall_v2/src/net/rtl_tcp_server.hpp
+@@ -9,7 +9,9 @@
+ 
+ class RtlTcpServer {
+ private:
+-    int server_socket, client_socket;
++    int server_socket;
++    // server_loop owns close/reset; its worker is joined before either.
++    std::atomic<int> client_socket;
+     std::thread server_thread, worker_thread;
+     std::atomic<bool> running{true};
+     // The streamed channel is the global rtl_tcp_channel (types.hpp): one
+@@ -32,12 +34,12 @@ private:
+     static constexpr int MAX_BUFFER_COUNT = 500;
+     
+     void server_loop();
+-    void worker_loop();
++    void worker_loop(int client_fd);
+     void add_to_buffer(const uint8_t* data, size_t len);
+     void clear_buffers();
+-    void send_dongle_info();
++    bool send_dongle_info(int client_fd);
+     // Drain the client's 5-byte rtl_tcp commands. false = the client closed.
+-    bool read_client_commands();
++    bool read_client_commands(int client_fd);
+     uint32_t ignored_cmds_logged = 0;  // command types already logged this connection
+     uint8_t cmd_carry[5] = {};         // partial command carried to the next read
+     size_t cmd_carry_len = 0;
+@@ -53,6 +55,6 @@ public:
+     void broadcast_data(const std::vector<ComplexBuffer>& channel_data);
+ 
+     // Whether a client is currently connected (single-client server), for the
+-    // status dashboard. Benign racy read of the socket fd — display only.
+-    bool has_client() const { return client_socket >= 0; }
++    // status dashboard. The server thread owns the underlying descriptor.
++    bool has_client() const { return client_socket.load() >= 0; }
+ };
 diff --git a/heimdall_v2/src/net/tcp_common.cpp b/heimdall_v2/src/net/tcp_common.cpp
 index 74017fa..b829bd7 100644
 --- a/heimdall_v2/src/net/tcp_common.cpp
@@ -1207,7 +1521,7 @@ index 52759e3..5e83715 100644
 +PacketWriteResult send_packet_with_deadline(int socket, const uint8_t* data, size_t size, std::chrono::milliseconds deadline);
 \ No newline at end of file
 diff --git a/heimdall_v2/src/net/tcp_control_server.cpp b/heimdall_v2/src/net/tcp_control_server.cpp
-index 787ed0b..3420cfc 100644
+index 787ed0b..27d6649 100644
 --- a/heimdall_v2/src/net/tcp_control_server.cpp
 +++ b/heimdall_v2/src/net/tcp_control_server.cpp
 @@ -6,6 +6,7 @@
@@ -1218,27 +1532,76 @@ index 787ed0b..3420cfc 100644
  #include <iostream>
  #include <sstream>
  #include <algorithm>
-@@ -75,8 +76,8 @@ bool TcpControlServer::start() {
-     
+@@ -65,26 +66,32 @@ TcpControlServer::~TcpControlServer() {
+ }
+ 
+ bool TcpControlServer::start() {
+-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+-    if (server_socket < 0) return false;
+-    
+-    if (!set_socket_reuse(server_socket)) {
+-        close(server_socket);
+-        return false;
+-    }
+-    
++    if (server_thread.joinable() || server_socket >= 0) return false;
++    // Publish only a fully configured listener. Failed starts own and close
++    // their local fd; stop()/the destructor must never close a reused number.
++    const int listener = socket(AF_INET, SOCK_STREAM, 0);
++    if (listener < 0) return false;
++    auto fail = [&]() { close(listener); return false; };
++    if (listener >= FD_SETSIZE || !set_socket_reuse(listener) ||
++        !set_socket_nonblocking(listener)) return fail();
++
      sockaddr_in addr{};
      addr.sin_family = AF_INET;
 -    addr.sin_addr.s_addr = INADDR_ANY;
 -    addr.sin_port = htons(TCP_CONTROL_PORT);
-+    if (inet_pton(AF_INET, heimdall_bind_host.c_str(), &addr.sin_addr) != 1) { close(server_socket); return false; }
+-    
+-    if (bind(server_socket, (sockaddr*)&addr, sizeof(addr)) < 0 || listen(server_socket, 5) < 0) {
+-        close(server_socket);
+-        return false;
++    if (inet_pton(AF_INET, heimdall_bind_host.c_str(), &addr.sin_addr) != 1) return fail();
 +    addr.sin_port = htons(tcp_control_port);
-     
-     if (bind(server_socket, (sockaddr*)&addr, sizeof(addr)) < 0 || listen(server_socket, 5) < 0) {
-         close(server_socket);
-@@ -84,7 +85,7 @@ bool TcpControlServer::start() {
++    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) < 0 ||
++        listen(listener, 5) < 0) return fail();
++
++    server_socket = listener;
++    running = true;
++    try {
++        server_thread = std::thread(&TcpControlServer::control_loop, this);
++    } catch (...) {
++        running = false;
++        server_socket = -1;
++        return fail();
      }
-     
-     server_thread = std::thread(&TcpControlServer::control_loop, this);
+-    
+-    server_thread = std::thread(&TcpControlServer::control_loop, this);
 -    std::cout << "TCP Control Server listening on port " << TCP_CONTROL_PORT << std::endl;
 +    std::cout << "TCP Control Server listening on port " << tcp_control_port << std::endl;
      return true;
  }
  
-@@ -126,6 +127,7 @@ void TcpControlServer::stop() {
+@@ -112,13 +119,15 @@ std::string rf_range_error(const std::string& given) {
+ 
+ void TcpControlServer::stop() {
+     running = false;
++    // The loop has a bounded select and a nonblocking accept. Keep its fd
++    // alive and unchanged until join: close/reset here raced FD_ISSET(-1).
++    if (server_thread.joinable()) server_thread.join();
+     if (server_socket >= 0) {
+         close(server_socket);
+         server_socket = -1;
+     }
+-    if (server_thread.joinable()) {
+-        server_thread.join();
+-    }
++    std::lock_guard<std::mutex> lock(clients_mutex);
++    clients.clear();
+ }
+ 
+ // The status object: broadcast at 2 Hz (as_reply = false) and returned by
+@@ -126,6 +135,7 @@ void TcpControlServer::stop() {
  // like every other command reply - clients tell replies from broadcasts by
  // that field). No trailing newline.
  std::string TcpControlServer::build_status_json(bool as_reply) {
@@ -1246,7 +1609,7 @@ index 787ed0b..3420cfc 100644
      // Build status JSON including RTL-TCP channel info and wideband mode
      std::stringstream status_json;
      status_json << "{"
-@@ -142,6 +144,20 @@ std::string TcpControlServer::build_status_json(bool as_reply) {
+@@ -142,6 +152,20 @@ std::string TcpControlServer::build_status_json(bool as_reply) {
                 << "\"operating_mode\":\"" << operating_mode_name(operating_mode.load()) << "\","
                 << "\"wideband_enabled\":" << (wideband_config.enabled.load() ? "true" : "false");
  
@@ -1267,7 +1630,7 @@ index 787ed0b..3420cfc 100644
      // KerberosSDR support mode: manual-calibration workflow state for client UIs.
      status_json << ",\"external_noise\":" << (external_noise_mode.load() ? "true" : "false");
      if (kerberos_mode.load()) {
-@@ -224,6 +240,9 @@ std::string TcpControlServer::build_status_json(bool as_reply) {
+@@ -224,16 +248,16 @@ std::string TcpControlServer::build_status_json(bool as_reply) {
  }
  
  void TcpControlServer::broadcast_status() {
@@ -1276,8 +1639,11 @@ index 787ed0b..3420cfc 100644
 +    const std::string status_str = build_status_json(false) + "\n";
      std::lock_guard<std::mutex> lock(clients_mutex);
  
-     // Remove inactive clients
-@@ -232,8 +251,6 @@ void TcpControlServer::broadcast_status() {
+-    // Remove inactive clients
+-    clients.erase(std::remove_if(clients.begin(), clients.end(),
+-        [](const auto& client) { return !client->active; }), clients.end());
++    // Only control_loop reaps: it may currently be selecting these fds.
++    if (!running) return;
  
      if (clients.empty()) return;
  
@@ -1286,7 +1652,80 @@ index 787ed0b..3420cfc 100644
      // Send to all connected clients. Queued, never blocking: this runs on the
      // status broadcaster thread while holding clients_mutex, so a blocking
      // send() here would freeze the control loop (no accepts, no commands) and
-@@ -407,6 +424,10 @@ void TcpControlServer::handle_client_data(TcpClient* client) {
+@@ -246,26 +270,31 @@ void TcpControlServer::broadcast_status() {
+ }
+ 
+ void TcpControlServer::control_loop() {
++    const int listener = server_socket;  // immutable until this thread joins
++    if (listener < 0 || listener >= FD_SETSIZE) return;
+     while (running) {
+         fd_set read_fds, write_fds;
+         FD_ZERO(&read_fds);
+         FD_ZERO(&write_fds);
+-        FD_SET(server_socket, &read_fds);
++        FD_SET(listener, &read_fds);
+ 
+-        int max_fd = server_socket;
++        int max_fd = listener;
+ 
+         // Add existing clients to read set
+         {
+             std::lock_guard<std::mutex> lock(clients_mutex);
+ 
+-            // Reap clients that went inactive since the last pass - the
+-            // TcpClient destructor closes the fd. Pruning used to happen only
+-            // in broadcast_status(), so a stalled broadcaster leaked one fd per
+-            // reconnect until accept() started failing.
++            // Only this loop reaps clients, before building its next fd set.
++            // The broadcaster may mark inactive but cannot close/reuse an fd
++            // while select is running without clients_mutex held.
+             clients.erase(std::remove_if(clients.begin(), clients.end(),
+                 [](const auto& client) { return !client->active; }), clients.end());
+ 
+             for (const auto& client : clients) {
++                if (client->socket < 0 || client->socket >= FD_SETSIZE) {
++                    client->active = false;
++                    continue;
++                }
+                 if (client->active) {
+                     FD_SET(client->socket, &read_fds);
+                     // Only watch for writability while output is pending -
+@@ -281,25 +310,30 @@ void TcpControlServer::control_loop() {
+         timeval timeout{0, 100000}; // 100ms timeout
+         int result = select(max_fd + 1, &read_fds, &write_fds, nullptr, &timeout);
+ 
++        if (!running) break;
++        if (result < 0 && errno != EINTR) break;
+         if (result > 0) {
+             // Check for new connections
+-            if (FD_ISSET(server_socket, &read_fds)) {
++            if (FD_ISSET(listener, &read_fds)) {
+                 sockaddr_in client_addr{};
+                 socklen_t addr_len = sizeof(client_addr);
+-                int client_socket = accept(server_socket, (sockaddr*)&client_addr, &addr_len);
++                int client_socket = accept(listener, (sockaddr*)&client_addr, &addr_len);
+                 
+                 if (client_socket >= 0) {
+                     std::lock_guard<std::mutex> lock(clients_mutex);
+                     // select() cannot watch an fd at or beyond FD_SETSIZE, and
+                     // FD_SET on one corrupts memory - refuse rather than risk it.
+-                    if (client_socket >= FD_SETSIZE || clients.size() >= MAX_CONTROL_CLIENTS) {
++                    if (!running || client_socket >= FD_SETSIZE || clients.size() >= MAX_CONTROL_CLIENTS) {
+                         std::cerr << "TCP Control: refusing connection (fd " << client_socket
+                                   << ", " << clients.size() << " clients)" << std::endl;
+                         close(client_socket);
+                     } else {
+                         // Non-blocking: every write to this socket goes through
+                         // flush_output(), which treats EAGAIN as back-pressure.
+-                        set_socket_nonblocking(client_socket);
++                        if (!set_socket_nonblocking(client_socket)) {
++                            close(client_socket);
++                            continue;
++                        }
+                         clients.push_back(std::make_unique<TcpClient>(client_socket));
+                         std::cout << "TCP Control: Client connected from " << inet_ntoa(client_addr.sin_addr) << std::endl;
+                     }
+@@ -407,6 +441,10 @@ void TcpControlServer::handle_client_data(TcpClient* client) {
  }
  
  std::string TcpControlServer::process_command(const std::string& json_str) {
@@ -1297,7 +1736,7 @@ index 787ed0b..3420cfc 100644
      // While an element-count reconfiguration owns the devices, refuse every
      // command except get_status: most handlers touch device handles that are
      // being closed/reopened on another thread.
-@@ -509,6 +530,7 @@ std::string TcpControlServer::process_command(const std::string& json_str) {
+@@ -509,6 +547,7 @@ std::string TcpControlServer::process_command(const std::string& json_str) {
              return "{\"status\":\"error\",\"message\":\"" + err + "\"}";
          }
          std::thread([n]() {
@@ -1305,7 +1744,7 @@ index 787ed0b..3420cfc 100644
              std::string err;
              if (!reconfigure_num_elements(n, err)) {
                  std::cerr << "Element-count change to " << n << " failed: " << err << std::endl;
-@@ -694,6 +716,8 @@ std::string TcpControlServer::process_command(const std::string& json_str) {
+@@ -694,6 +733,8 @@ std::string TcpControlServer::process_command(const std::string& json_str) {
      // {"command":"set_if_vga","index":0-15}. Not persisted; the next gain
      // change re-applies the configured step (R820T_IF_VGA_* in config.h).
      if (json_str.find("\"set_if_vga\"") != std::string::npos) {
@@ -1314,7 +1753,7 @@ index 787ed0b..3420cfc 100644
          size_t pos = json_str.find("\"index\":");
          if (pos == std::string::npos) {
              return "{\"status\":\"error\",\"message\":\"Missing index field (0-15)\"}";
-@@ -1134,4 +1158,4 @@ std::string TcpControlServer::process_command(const std::string& json_str) {
+@@ -1134,4 +1175,4 @@ std::string TcpControlServer::process_command(const std::string& json_str) {
      }
  
      return "{\"status\":\"error\",\"message\":\"Unknown command\"}";
@@ -1322,7 +1761,7 @@ index 787ed0b..3420cfc 100644
 \ No newline at end of file
 +}
 diff --git a/heimdall_v2/src/net/tcp_data_server.cpp b/heimdall_v2/src/net/tcp_data_server.cpp
-index 86838ea..9e00612 100644
+index 86838ea..37a1dab 100644
 --- a/heimdall_v2/src/net/tcp_data_server.cpp
 +++ b/heimdall_v2/src/net/tcp_data_server.cpp
 @@ -2,6 +2,7 @@
@@ -1333,28 +1772,75 @@ index 86838ea..9e00612 100644
  #include <iostream>
  #include <algorithm>
  #include <chrono>
-@@ -34,8 +35,8 @@ bool TcpDataServer::start() {
-     
+@@ -24,50 +25,55 @@ TcpDataServer::~TcpDataServer() {
+ }
+ 
+ bool TcpDataServer::start() {
+-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+-    if (server_socket < 0) return false;
+-    
+-    if (!set_socket_reuse(server_socket)) {
+-        close(server_socket);
+-        return false;
+-    }
+-    
++    if (server_thread.joinable() || server_socket >= 0) return false;
++    // Publish only a fully configured listener. Failed starts own and close
++    // their local fd; stop()/the destructor must never close a reused number.
++    const int listener = socket(AF_INET, SOCK_STREAM, 0);
++    if (listener < 0) return false;
++    auto fail = [&]() { close(listener); return false; };
++    if (listener >= FD_SETSIZE || !set_socket_reuse(listener) ||
++        !set_socket_nonblocking(listener)) return fail();
++
      sockaddr_in addr{};
      addr.sin_family = AF_INET;
 -    addr.sin_addr.s_addr = INADDR_ANY;
 -    addr.sin_port = htons(TCP_DATA_PORT);
-+    if (inet_pton(AF_INET, heimdall_bind_host.c_str(), &addr.sin_addr) != 1) { close(server_socket); return false; }
+-    
+-    if (bind(server_socket, (sockaddr*)&addr, sizeof(addr)) < 0) {
+-        close(server_socket);
+-        return false;
+-    }
+-    
+-    if (listen(server_socket, 5) < 0) {
+-        close(server_socket);
+-        return false;
++    if (inet_pton(AF_INET, heimdall_bind_host.c_str(), &addr.sin_addr) != 1) return fail();
 +    addr.sin_port = htons(tcp_data_port);
-     
-     if (bind(server_socket, (sockaddr*)&addr, sizeof(addr)) < 0) {
-         close(server_socket);
-@@ -48,7 +49,7 @@ bool TcpDataServer::start() {
++    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) < 0 ||
++        listen(listener, 5) < 0) return fail();
++
++    server_socket = listener;
++    running = true;
++    try {
++        server_thread = std::thread(&TcpDataServer::accept_loop, this);
++    } catch (...) {
++        running = false;
++        server_socket = -1;
++        return fail();
      }
-     
-     server_thread = std::thread(&TcpDataServer::accept_loop, this);
+-    
+-    server_thread = std::thread(&TcpDataServer::accept_loop, this);
 -    std::cout << "TCP Data Server listening on port " << TCP_DATA_PORT << std::endl;
 +    std::cout << "TCP Data Server listening on port " << tcp_data_port << std::endl;
      return true;
  }
  
-@@ -63,7 +64,7 @@ void TcpDataServer::stop() {
+ void TcpDataServer::stop() {
+     running = false;
++    // The loop has a bounded select and a nonblocking accept. Keep its fd
++    // alive and unchanged until join: close/reset here raced FD_ISSET(-1).
++    if (server_thread.joinable()) server_thread.join();
+     if (server_socket >= 0) {
+         close(server_socket);
+         server_socket = -1;
      }
+-    if (server_thread.joinable()) {
+-        server_thread.join();
+-    }
++    std::lock_guard<std::mutex> lock(clients_mutex);
++    clients.clear();
  }
  
 -void TcpDataServer::broadcast_data(const std::vector<ComplexBuffer>& channel_data) {
@@ -1362,7 +1848,13 @@ index 86838ea..9e00612 100644
      if (channel_data.empty()) return;
      
      std::lock_guard<std::mutex> lock(clients_mutex);
-@@ -158,25 +159,8 @@ void TcpDataServer::broadcast_data(const std::vector<ComplexBuffer>& channel_dat
+     
++    if (!running) return;
++
+     // Remove inactive clients
+     clients.erase(std::remove_if(clients.begin(), clients.end(),
+         [](const auto& client) { return !client->active; }), clients.end());
+@@ -158,25 +164,8 @@ void TcpDataServer::broadcast_data(const std::vector<ComplexBuffer>& channel_dat
      append_big_endian(packet, num_channels);
      append_big_endian(packet, num_samples);
  
@@ -1390,7 +1882,7 @@ index 86838ea..9e00612 100644
  
      append_big_endian(packet, phase_state_value);
      append_big_endian(packet, noise_source_active);
-@@ -283,14 +267,31 @@ void TcpDataServer::broadcast_data(const std::vector<ComplexBuffer>& channel_dat
+@@ -283,14 +272,31 @@ void TcpDataServer::broadcast_data(const std::vector<ComplexBuffer>& channel_dat
              if (n < 0) continue;
              client->tx_buffer.erase(0, static_cast<size_t>(n));
              if (!client->tx_buffer.empty()) {
@@ -1422,7 +1914,7 @@ index 86838ea..9e00612 100644
              dropped_since_warn++;  // nothing of it went out: drop it whole
          } else if (static_cast<size_t>(n) < packet.size()) {
              client->tx_buffer.assign(reinterpret_cast<const char*>(packet.data()) + n,
-@@ -304,6 +305,8 @@ void TcpDataServer::broadcast_data(const std::vector<ComplexBuffer>& channel_dat
+@@ -304,34 +310,43 @@ void TcpDataServer::broadcast_data(const std::vector<ComplexBuffer>& channel_dat
                    << " packet(s) since the last report" << std::endl;
          dropped_since_warn = 0;
      }
@@ -1431,7 +1923,36 @@ index 86838ea..9e00612 100644
  }
  
  void TcpDataServer::accept_loop() {
-@@ -331,7 +334,10 @@ void TcpDataServer::accept_loop() {
++    const int listener = server_socket;  // immutable until this thread joins
++    if (listener < 0 || listener >= FD_SETSIZE) return;
+     while (running) {
+         fd_set read_fds;
+         FD_ZERO(&read_fds);
+-        FD_SET(server_socket, &read_fds);
++        FD_SET(listener, &read_fds);
+         
+         timeval timeout{0, 100000}; // 100ms timeout
+-        int result = select(server_socket + 1, &read_fds, nullptr, nullptr, &timeout);
++        int result = select(listener + 1, &read_fds, nullptr, nullptr, &timeout);
+         
+-        if (result > 0 && FD_ISSET(server_socket, &read_fds)) {
++        if (!running) break;
++        if (result < 0 && errno != EINTR) break;
++        if (result > 0 && FD_ISSET(listener, &read_fds)) {
+             sockaddr_in client_addr{};
+             socklen_t addr_len = sizeof(client_addr);
+-            int client_socket = accept(server_socket, (sockaddr*)&client_addr, &addr_len);
++            int client_socket = accept(listener, (sockaddr*)&client_addr, &addr_len);
+             
+             if (client_socket >= 0) {
+                 std::lock_guard<std::mutex> lock(clients_mutex);
+                 clients.erase(std::remove_if(clients.begin(), clients.end(),
+                     [](const auto& client) { return !client->active; }), clients.end());
+-                if (clients.size() >= MAX_DATA_CLIENTS) {
++                if (!running || clients.size() >= MAX_DATA_CLIENTS) {
+                     std::cerr << "TCP Data: refusing connection from " << inet_ntoa(client_addr.sin_addr)
+                               << " (" << clients.size() << " clients connected)" << std::endl;
+                     close(client_socket);
                      continue;
                  }
                  // Set non-blocking mode
@@ -1443,7 +1964,7 @@ index 86838ea..9e00612 100644
  
                  clients.push_back(std::make_unique<TcpClient>(client_socket));
                  std::cout << "TCP Data: FFT Viewer connected from " << inet_ntoa(client_addr.sin_addr) 
-@@ -340,4 +346,4 @@ void TcpDataServer::accept_loop() {
+@@ -340,4 +355,4 @@ void TcpDataServer::accept_loop() {
              }
          }
      }

@@ -388,11 +388,14 @@ def stop(process):
     if process.poll() is None:
         process.send_signal(signal.SIGTERM)
     try:
-        process.wait(timeout=10)
+        returncode = process.wait(timeout=10)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
         raise AssertionError("Simulated Heimdall did not stop within10s")
+    reason = f" ({signal.Signals(-returncode).name})" if returncode < 0 else ""
+    assert returncode == 0, (
+        f"Native Heimdall did not exit cleanly during shutdown: returncode={returncode}{reason}")
 
 
 def verify_shutdown(events):
