@@ -223,10 +223,30 @@ def compile_module(kit, sdk, destination):
     user = pwd.getpwnam(BUILD_USER)
     require(user.pw_uid != 0 and user.pw_gid != 0, 'the dedicated compiler account must not be root')
     def limits():
-        os.setgroups([]); os.setgid(user.pw_gid); os.setuid(user.pw_uid)
-        resource.setrlimit(resource.RLIMIT_CPU, (90,90)); resource.setrlimit(resource.RLIMIT_AS, (1024*1024*1024,)*2)
-        resource.setrlimit(resource.RLIMIT_FSIZE, (32*1024*1024,)*2)
-        resource.setrlimit(resource.RLIMIT_NPROC, (32,32))
+        step = 'setgroups'
+        try:
+            os.setgroups([])
+            step = 'setgid'; os.setgid(user.pw_gid)
+            step = 'setuid'; os.setuid(user.pw_uid)
+            for name, kind, maximum in (
+                    ('RLIMIT_CPU', resource.RLIMIT_CPU, 90),
+                    ('RLIMIT_AS', resource.RLIMIT_AS, 1024*1024*1024),
+                    ('RLIMIT_FSIZE', resource.RLIMIT_FSIZE, 32*1024*1024),
+                    ('RLIMIT_NPROC', resource.RLIMIT_NPROC, 32)):
+                step = name
+                # Never raise an inherited restriction, or ask this now
+                # unprivileged child to increase its inherited hard limit.
+                ceiling = min([maximum] + [value for value in resource.getrlimit(kind)
+                                           if value != resource.RLIM_INFINITY])
+                resource.setrlimit(kind, (ceiling, ceiling))
+        except BaseException as error:
+            # Python hides exceptions raised by preexec_fn. Return the precise
+            # setup failure through bounded stderr and never exec as root.
+            try:
+                message = f'compiler child setup failed at {step}: {type(error).__name__}: {error}\n'
+                os.write(2, message[:512].encode('utf8', errors='replace'))
+            finally:
+                os._exit(125)
     argv = [COMPILER, '-std=c++17', '-shared', '-fPIC', '-fvisibility=hidden', '-fvisibility-inlines-hidden', '-DBLAH2_MODULE_RSPDUO=1', *kit['compiler']['cxx_flags'], '-I', str(KIT/'src'), '-I', str(KIT/'generated'), '-I', str(INCLUDE), str(KIT/'src/capture/ReceiverFactory.cpp'), str(KIT/'src/capture/rspduo/RspDuo.cpp'), str(CORE), str(LIBRARY), '-pthread', '-Wl,-z,defs', '-o', str(destination)]
     code, output = bounded(argv, 120, limits)
     require(code == 0, 'adapter compilation failed: ' + output.decode(errors='replace')[-1000:])
