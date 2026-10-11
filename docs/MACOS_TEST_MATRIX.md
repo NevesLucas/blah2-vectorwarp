@@ -1,5 +1,13 @@
 # macOS verification and remaining hardware coverage
 
+The [October 2026 Kraken Suite update](KRAKEN_SUITE_UPDATE_2026_10.md) has separate
+software-only evidence for upstream `f648514df41d`: all seven native simulation
+scenarios on Apple M2 and Fedora 44 x86_64, first-party receiver socket tests on
+both platforms, and the Mac API/lifecycle path using the updated companion.
+No receiver was attached for that update. The historical physical and hosted CI
+results below apply to their recorded earlier revisions; they do not qualify
+the October source pin on hardware, Intel Mac or Linux ARM.
+
 Standalone installer development is separate from the accepted Homebrew/source
 matrix below. Local Apple Silicon testing has verified relocation of 142 native
 files, bundled Python/Node startup, synthetic CPU replay with browser Save &

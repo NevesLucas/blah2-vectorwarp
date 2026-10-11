@@ -146,3 +146,61 @@ jobs:
           path: release-review/
           if-no-files-found: error
           retention-days: 14
+
+  kraken-linux-simulation:
+    name: Native Kraken software simulation (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install native build dependencies before fetching sources
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential cmake make patch pkg-config python3 binutils \
+            libfftw3-dev libeigen3-dev libusb-1.0-0-dev zlib1g-dev libssl-dev
+      - name: Test fail-closed simulation audit
+        run: python3 test/kraken/test_linux_simulator.py -v
+      - name: Compile exact pinned native driver and prepare isolated simulation
+        run: python3 test/kraken/build_linux_simulator.py --output-dir build/kraken-linux-prepared --jobs 2
+      - name: Exercise native loopback protocol and calibration with simulated samples
+        run: |
+          python3 test/macos/kraken/native_simulation_test.py \
+            --heimdall build/kraken-linux-prepared/heimdall-simulated \
+            --manifest build/kraken-linux-prepared/binary-manifest.json \
+            --output build/kraken-linux-evidence
+      - name: Collect compact software test evidence
+        if: always()
+        run: |
+          mkdir -p build/kraken-linux-review
+          python3 - <<'PY'
+          import pathlib, shutil
+          target = pathlib.Path('build/kraken-linux-review')
+          for name in ('binary-manifest.json', 'simulated-link.txt',
+                       'native-compile-flags.txt', 'driver-compile-flags.txt'):
+              source = pathlib.Path('build/kraken-linux-prepared') / name
+              if source.is_file(): shutil.copy2(source, target / name)
+          evidence = pathlib.Path('build/kraken-linux-evidence')
+          if evidence.exists():
+              for source in evidence.rglob('*'):
+                  if source.is_file() and source.suffix in ('.json', '.log', '.jsonl'):
+                      destination = target / 'tests' / source.relative_to(evidence)
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      if source.stat().st_size <= 262144:
+                          shutil.copy2(source, destination)
+                      else:
+                          destination.write_bytes(source.read_bytes()[-262144:])
+          PY
+      - name: Upload compact review evidence (no upstream sources or native binaries)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kraken-linux-simulation-${{ matrix.runner }}-${{ github.sha }}
+          path: build/kraken-linux-review/
+          if-no-files-found: warn
+          retention-days: 14

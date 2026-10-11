@@ -97,7 +97,7 @@ function normalizeStatus(frame) {
       !Number.isInteger(channelCount) || !Number.isInteger(maximumChannels) ||
       channelCount < 1 || maximumChannels < channelCount || maximumChannels > 64 ||
       typeof frame.reconfiguring !== 'boolean' ||
-      !['coherent', 'wideband'].includes(frame.operating_mode))
+      !['coherent', 'wideband', 'independent'].includes(frame.operating_mode))
     throw receiverError('KRAKEN_PROTOCOL_MISMATCH',
       'Suite V2 status is missing tuning, channel, mode, or reconfiguration fields.', 502);
   return {

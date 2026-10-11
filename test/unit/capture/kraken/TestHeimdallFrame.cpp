@@ -102,13 +102,24 @@ TEST_CASE("Heimdall V2 rejects calibration and retune frames")
     HeimdallFrame::decode_header(bytes)));
 
   bytes = valid_header();
-  write_be_u32(bytes, 12, 0x100U | HeimdallFrame::CALIBRATED);
+  write_be_u32(bytes, 12, HeimdallFrame::MANUAL_CALIBRATION | HeimdallFrame::CALIBRATED);
   REQUIRE(HeimdallFrame::is_synchronized_data(
     HeimdallFrame::decode_header(bytes)));
 
-  write_be_u32(bytes, 12, 0x200U | HeimdallFrame::CALIBRATED);
+  write_be_u32(bytes, 12, HeimdallFrame::STALE_CALIBRATION | HeimdallFrame::CALIBRATED);
   REQUIRE_FALSE(HeimdallFrame::is_synchronized_data(
     HeimdallFrame::decode_header(bytes)));
+
+  // Suite main f648514 marks streams with no coherent phase compensation as
+  // wideband (0x400) or independent tuner (0x800).  Neither may reach the
+  // passive-radar pipeline merely because their low-byte state is CALIBRATED.
+  for (const uint32_t flag : {HeimdallFrame::WIDEBAND_MODE,
+      HeimdallFrame::INDEPENDENT_MODE})
+  {
+    write_be_u32(bytes, 12, flag | HeimdallFrame::CALIBRATED);
+    REQUIRE_FALSE(HeimdallFrame::is_synchronized_data(
+      HeimdallFrame::decode_header(bytes)));
+  }
 }
 
 TEST_CASE("Heimdall V2 validates frame dimensions")

@@ -32,10 +32,12 @@ class ReceiverUpdateTests(unittest.TestCase):
             'sourceCommit': '2af4ddb96219a99d2300804830e0971f79557b23',
         }
         self.raw = json.dumps(self.catalog).encode()
+        kraken = next(item for item in self.catalog['software']
+                      if item['id'] == 'kraken-suite-v2')['lastSeen']['identity']
         self.payloads = {
             "kraken-suite-v2": {
-                "sha": "15c1a7ee3f05d909c0c5835addd126849a7d8deb",
-                "html_url": "https://github.com/krakenrf/krakensdr_suite/commit/15c1a7ee3f05d909c0c5835addd126849a7d8deb",
+                "sha": kraken,
+                "html_url": "https://github.com/krakenrf/krakensdr_suite/commit/" + kraken,
             },
             "uhd": {
                 "tag_name": "v4.10.0.0", "draft": False, "prerelease": False,

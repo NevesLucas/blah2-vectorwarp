@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import collections
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -19,6 +20,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 
@@ -27,14 +29,45 @@ def checked(argv, **kwargs):
     return subprocess.run(argv, check=True, text=True, capture_output=True, **kwargs).stdout
 
 
+def macos_cxx():
+    requested = os.environ.get("CXX")
+    if requested:
+        return [requested]
+    if shutil.which("xcrun"):
+        # Keep xcrun's SDK environment setup; invoking its --find result
+        # directly can lose the C++ standard-library header search path.
+        return ["xcrun", "clang++"]
+    return [shutil.which("clang++") or "clang++"]
+
+
 def load_commands(binary):
     return [line.strip().split(" (", 1)[0]
             for line in checked(["otool", "-L", str(binary)]).splitlines()[1:]]
 
 
+def verify_linux(args, binary):
+    manifest = getattr(args, "manifest", None)
+    if manifest is None:
+        raise ValueError("Linux requires --manifest from build_linux_simulator.py")
+    filename = Path(__file__).resolve().parents[2] / "kraken/build_linux_simulator.py"
+    spec = importlib.util.spec_from_file_location("linux_kraken_simulator", filename)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper.verify_prepared(binary, manifest)
+
+
 def prepare(args, work):
+    if sys.platform.startswith("linux"):
+        receipt = verify_linux(args, args.heimdall)
+        (work / "binary-manifest.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        # Its audited $ORIGIN dependency must remain beside the prepared binary.
+        return args.heimdall
+    if sys.platform != "darwin":
+        raise ValueError("Native simulation supports macOS and Linux only")
+    if not getattr(args, "include", None):
+        raise ValueError("macOS requires --include with the pinned RTL-SDR headers")
     fake = work / "libvectorwarp-simulated-rtlsdr.dylib"
-    checked(["xcrun", "clang++", "-std=c++17", "-O2", "-dynamiclib", "-pthread",
+    checked([*macos_cxx(), "-std=c++17", "-O2", "-dynamiclib", "-pthread",
              "-I", str(args.include), str(Path(__file__).with_name("fake_rtlsdr.cpp")),
              "-Wl,-install_name," + str(fake), "-o", str(fake)])
     # A test-driver dependency on libusb or librtlsdr would invalidate isolation.
@@ -170,7 +203,7 @@ class Frames:
                 assert magic == 0x4D434851 and channels == 5 and 0 < samples <= 262144, fields
                 metadata = struct.unpack("<" + "ff" * channels, self.exact(channels * 8))
                 payload = self.exact(channels * samples * 2)
-                valid = (phase & 0xff) == 4 and not phase & 0x200 and noise == 0 and retuning == 0
+                valid = (phase & 0xff) == 4 and not phase & 0xe00 and noise == 0 and retuning == 0
                 # Deterministic test driver has a twofold noise-on envelope.
                 # Sample the reference channel only, avoiding hot-path Python work.
                 envelope = math.sqrt(sum((payload[i] - 127.5) ** 2
@@ -274,19 +307,21 @@ class Control:
             time.sleep(.02)
         raise AssertionError(f"No control state {state} after message {after}")
 
-    def wait_calibrated(self, frequency, timeout=5, gain=None):
+    def wait_calibrated(self, frequency, timeout=5, gain=None, after=0):
         deadline = time.monotonic() + timeout
+        messages = []
         while time.monotonic() < deadline:
             if self.error:
                 raise AssertionError(self.error)
             with self.lock:
                 messages = list(self.messages)
-            if any(m.get("calibration_state") == "CONVERGED" and
+            if any(m["_fixtureSequence"] > after and
+                   m.get("calibration_state") == "CONVERGED" and
                    m.get("settings", {}).get("center_freq") == frequency and
                    (gain is None or m.get("settings", {}).get("gain") == gain) for m in messages):
                 return
             time.sleep(.02)
-        raise AssertionError(f"No CONVERGED control status at {frequency}; last={messages[-2:]}")
+        raise AssertionError(f"No CONVERGED control status at {frequency} after message {after}; last={messages[-2:]}")
 
     def close(self):
         self.stopped.set()
@@ -299,8 +334,11 @@ def numerical_check(frames):
         frame, payload = frames.latest_valid
     samples = frame["samples"]
     channels = []
-    # Avoid FIR startup samples and use the unchanged native convergence bounds:
-    # <=1 degree residual phase and <=2dB residual amplitude; integer lag must be0.
+    # The Suite now applies phase only.  The fixture's injected gain offsets
+    # must survive calibration; normalizing them would hide a wrong amplitude
+    # compensation path.
+    expected_gain_db = {1: 20 * math.log10(.9), 2: 20 * math.log10(1.1),
+                        3: 20 * math.log10(.85), 4: 20 * math.log10(1.05)}
     for ch in range(5):
         raw = payload[ch * samples * 2:(ch + 1) * samples * 2]
         channels.append([complex(raw[2*i] - 127.5, raw[2*i+1] - 127.5)
@@ -318,8 +356,10 @@ def numerical_check(frames):
             b = values[max(0, lag):len(values) - max(0, -lag)]
             lag_scores[lag] = abs(sum(x.conjugate() * y for x, y in zip(a, b)))
         best_lag = max(lag_scores, key=lag_scores.get)
-        assert abs(phase) <= 1.0 and abs(db) <= 2.0 and best_lag == 0, (channel, phase, db, best_lag)
-        results.append(dict(channel=channel, phaseDegrees=phase, amplitudeDb=db, integerLag=best_lag))
+        assert abs(phase) <= 1.0 and abs(db - expected_gain_db[channel]) <= .25 and best_lag == 0, \
+            (channel, phase, db, expected_gain_db[channel], best_lag)
+        results.append(dict(channel=channel, phaseDegrees=phase, amplitudeDb=db,
+                            expectedAmplitudeDb=expected_gain_db[channel], integerLag=best_lag))
     return results
 
 
@@ -331,9 +371,17 @@ def command(sock, value):
     sock.sendall(data[7:])
 
 
-def driver_events(work):
+def driver_events(work, complete=False):
     path = work / "driver.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    if not path.exists():
+        return []
+    # A live snapshot can end during the driver's append. Only newline commits
+    # a record; complete malformed records must still fail instead of vanishing.
+    records = path.read_bytes().split(b"\n")
+    tail = records.pop()
+    if complete and tail:
+        raise AssertionError("Driver event log has an incomplete final record after shutdown")
+    return [json.loads(line) for line in records]
 
 
 def stop(process):
@@ -357,6 +405,9 @@ def verify_shutdown(events):
 
 
 def run_case(args, binary, work, name, fail=None, count=5):
+    if sys.platform.startswith("linux"):
+        # Verify again immediately before each process, including recovery runs.
+        verify_linux(args, binary)
     case = work / name
     case.mkdir(mode=0o700)
     (case / "command").write_text("fail_noise_off" if name == "noise_failure" else "")
@@ -481,29 +532,84 @@ def run_case(args, binary, work, name, fail=None, count=5):
             report["initialCalibratedFrame"] = first["number"]
             report["numerical"] = numerical_check(frames)
             control_reader.wait_calibrated(100000000)
+            # Fixed R820T IF VGA is explicit at startup: manual gain selects
+            # the Suite's manual index (8), encoded by the fork as 10008.
+            events = driver_events(case)
+            assert {e["channel"] for e in events if e["event"] == "if_vga" and e["value"] == 10008} == set(range(5))
+            report["ifVgaStartupManual"] = 8
             print(json.dumps({"case": name, "stage": "calibrated", "numerical": report["numerical"]}), flush=True)
 
+            # The direct upstream diagnostic bypasses coherent calibration.
+            # The companion must refuse it before touching any channel's VGA.
+            control_mark = control_reader.mark()
+            before_diagnostic = len(driver_events(case))
+            command(control, {"command": "set_if_vga", "index": 9})
+            deadline = time.monotonic() + 5
+            refusal = None
+            while time.monotonic() < deadline:
+                assert process.poll() is None and not control_reader.error, control_reader.error
+                with control_reader.lock:
+                    refusal = next((m.copy() for m in control_reader.messages
+                                    if m["_fixtureSequence"] > control_mark and m.get("status") == "error"
+                                    and "unavailable in coherent mode" in m.get("message", "")), None)
+                if refusal:
+                    break
+                time.sleep(.02)
+            assert refusal is not None, "Coherent IF VGA diagnostic was not refused"
+            control_reader.wait_calibrated(100000000, after=refusal["_fixtureSequence"])
+            frames.wait(lambda f: f["valid"] and f["frequency"] == 100000000,
+                        after=frames.mark(), timeout=5)
+            assert not any(e["event"] == "if_vga" for e in driver_events(case)[before_diagnostic:])
+            report["ifVgaDiagnosticRefusedWithoutWrites"] = True
+
             mark = frames.mark()
+            control_mark = control_reader.mark()
             command(control, {"command": "set_frequency", "frequency": 101000000})
             invalid = frames.wait(lambda f: not f["valid"], after=mark, timeout=5)
             retuned = frames.wait(lambda f: f["valid"] and f["frequency"] == 101000000,
                                   after=invalid["number"], timeout=args.calibration_timeout)
             report["retuneCalibratedFrame"] = retuned["number"]
             report["retuneNumerical"] = numerical_check(frames)
-            control_reader.wait_calibrated(101000000)
+            control_reader.wait_calibrated(101000000, after=control_mark)
             print(json.dumps({"case": name, "stage": "retuned"}), flush=True)
 
             report["gainCalibratedFrames"] = {}
             for gain in (20, 40, 50):
                 mark = frames.mark()
+                control_mark = control_reader.mark()
                 command(control, {"command": "set_gain", "gain": gain})
                 invalid = frames.wait(lambda f: not f["valid"], after=mark, timeout=5)
                 changed = frames.wait(lambda f: f["valid"] and f["gain"] == gain,
                                       after=invalid["number"], timeout=args.calibration_timeout)
-                control_reader.wait_calibrated(101000000, gain=gain)
+                control_reader.wait_calibrated(101000000, gain=gain, after=control_mark)
                 report["gainCalibratedFrames"][str(gain)] = dict(frame=changed["number"],
                                                                numerical=numerical_check(frames))
                 print(json.dumps({"case": name, "stage": "gain_changed", "requestedGainDb": gain}), flush=True)
+
+            # Auto gain must switch to its own fixed VGA index (11), and the
+            # next manual command must restore index 8 before loss recovery.
+            before_auto = len(driver_events(case))
+            mark = frames.mark()
+            control_mark = control_reader.mark()
+            command(control, {"command": "set_gain", "gain": -1})
+            invalid = frames.wait(lambda f: not f["valid"], after=mark, timeout=5)
+            frames.wait(lambda f: f["valid"] and f["gain"] == -1, after=invalid["number"],
+                        timeout=args.calibration_timeout)
+            control_reader.wait_calibrated(101000000, gain=-1, after=control_mark)
+            assert {e["channel"] for e in driver_events(case)[before_auto:]
+                    if e["event"] == "if_vga" and e["value"] == 10011} == set(range(5))
+            report["ifVgaAuto"] = 11
+            before_manual = len(driver_events(case))
+            mark = frames.mark()
+            control_mark = control_reader.mark()
+            command(control, {"command": "set_gain", "gain": 50})
+            invalid = frames.wait(lambda f: not f["valid"], after=mark, timeout=5)
+            frames.wait(lambda f: f["valid"] and f["gain"] == 50, after=invalid["number"],
+                        timeout=args.calibration_timeout)
+            control_reader.wait_calibrated(101000000, gain=50, after=control_mark)
+            assert {e["channel"] for e in driver_events(case)[before_manual:]
+                    if e["event"] == "if_vga" and e["value"] == 10008} == set(range(5))
+            report["ifVgaManualRestored"] = 8
 
             mark = frames.mark()
             loss_control_mark = control_reader.mark()
@@ -538,7 +644,8 @@ def run_case(args, binary, work, name, fail=None, count=5):
                     raise AssertionError("Loss recovery remained PENDING past its bounded deadline")
                 if recovered:
                     report["lossRecoveryNumerical"] = numerical_check(frames)
-                    control_reader.wait_calibrated(101000000, gain=50)
+                    control_reader.wait_calibrated(101000000, gain=50,
+                                                   after=loss_status["_fixtureSequence"])
                     time.sleep(1)
                     report["lossRecoveryStableNumerical"] = numerical_check(frames)
                     report["lossRecoveredSimulated"] = True
@@ -570,7 +677,7 @@ def run_case(args, binary, work, name, fail=None, count=5):
             report["frames"] = frames.mark()
             report["delayedOldNoiseCallbacksRejected"] = True
             report["orderedShutdown"] = True
-        events = driver_events(case)
+        events = driver_events(case, complete=True)
         assert events and any(e["event"] == "simulated_enumeration" for e in events)
         report["driverEvents"] = len(events)
         return report
@@ -589,12 +696,15 @@ def run_case(args, binary, work, name, fail=None, count=5):
         elif control:
             control.close()
         log.close()
+        # The process has stopped, so an unterminated record is corruption now.
+        driver_events(case, complete=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--heimdall", type=Path, required=True)
-    parser.add_argument("--include", type=Path, required=True, help="Kraken fork rtl-sdr.h directory")
+    parser.add_argument("--include", type=Path, help="Kraken fork rtl-sdr.h directory (required on macOS)")
+    parser.add_argument("--manifest", type=Path, help="Audited prepared Linux simulator manifest")
     parser.add_argument("--output", type=Path, required=True, help="New directory for retained test evidence")
     parser.add_argument("--data-port", type=int, default=29191)
     parser.add_argument("--control-port", type=int, default=29192)
@@ -605,7 +715,10 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     args.heimdall = args.heimdall.resolve(strict=True)
-    args.include = args.include.resolve(strict=True)
+    if args.include:
+        args.include = args.include.resolve(strict=True)
+    if args.manifest:
+        args.manifest = args.manifest.resolve(strict=True)
     args.output = args.output.resolve()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     binary = prepare(args, args.output)

@@ -14,6 +14,13 @@ public:
   static constexpr std::size_t FIXED_HEADER_SIZE = 32;
   static constexpr uint32_t MAGIC = 0x4d434851; // "MCHQ"
   static constexpr uint32_t CALIBRATED = 4;
+  // The Suite stores the calibration state in the low byte and uses the
+  // higher bits to describe stream modes.  Passive radar needs the coherent,
+  // calibrated stream only.
+  static constexpr uint32_t MANUAL_CALIBRATION = 0x100;
+  static constexpr uint32_t STALE_CALIBRATION = 0x200;
+  static constexpr uint32_t WIDEBAND_MODE = 0x400;
+  static constexpr uint32_t INDEPENDENT_MODE = 0x800;
 
   struct Header
   {
