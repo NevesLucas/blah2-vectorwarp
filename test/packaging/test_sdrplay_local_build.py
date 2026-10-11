@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Offline contracts for the fixed-path local RSPduo adapter builder."""
-import fcntl, hashlib, importlib.util, json, os, pathlib, shutil, signal, stat, subprocess, tempfile, unittest
+import fcntl, hashlib, importlib.util, json, os, pathlib, resource, shutil, signal, stat, subprocess, tempfile, unittest
 from unittest import mock
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('builder',ROOT/'script/vectorwarp-build-sdrplay.py'); builder=importlib.util.module_from_spec(spec); spec.loader.exec_module(builder)
@@ -192,8 +192,64 @@ class LocalBuild(unittest.TestCase):
                       'MemoryMax=1536M','CPUQuota=100%','TasksMax=40'):
       self.assertIn(directive,unit)
     self.assertIn('CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETUID CAP_KILL',unit)
+    self.assertIn('AmbientCapabilities=CAP_SETUID\n',unit)
     self.assertNotIn('CAP_DAC_OVERRIDE',unit)
+    self.assertNotIn('CAP_SYS_RESOURCE',unit)
     self.assertNotIn('vectorwarp-processor.service',unit)
     tmpfiles=(ROOT/'contrib/systemd/vectorwarp.tmpfiles').read_text()
     self.assertIn('f /run/vectorwarp-rspduo-build.lock 0644 root root -',tmpfiles)
+
+class CompilerChildSetup(unittest.TestCase):
+  """Exercise setup decisions without changing the test runner's identity."""
+  def setUp(self):
+    self.user=type('User',(),{'pw_uid':12345,'pw_gid':12346})()
+    self.patchers=[mock.patch.object(builder.pwd,'getpwnam',return_value=self.user),
+                   mock.patch.object(builder.os,'setgroups'),
+                   mock.patch.object(builder.os,'setgid'),
+                   mock.patch.object(builder.os,'setuid'),
+                   mock.patch.object(builder.resource,'getrlimit',return_value=(resource.RLIM_INFINITY,)*2),
+                   mock.patch.object(builder.resource,'setrlimit')]
+    self.account,self.groups,self.gid,self.uid,self.getlimit,self.setlimit=[patcher.start() for patcher in self.patchers]
+    for patcher in self.patchers: self.addCleanup(patcher.stop)
+  def run_setup(self):
+    def child(argv,timeout,preexec):
+      preexec()
+      return 0,b''
+    with mock.patch.object(builder,'bounded',side_effect=child):
+      builder.compile_module({'compiler':{'cxx_flags':[]}}, {}, pathlib.Path('/unused-fixture-output'))
+  def test_normal_limits_and_identity_drop(self):
+    self.run_setup()
+    self.groups.assert_called_once_with([])
+    self.gid.assert_called_once_with(12346)
+    self.uid.assert_called_once_with(12345)
+    self.assertEqual(self.setlimit.call_args_list,[
+      mock.call(resource.RLIMIT_CPU,(90,90)),
+      mock.call(resource.RLIMIT_AS,(1024*1024*1024,)*2),
+      mock.call(resource.RLIMIT_FSIZE,(32*1024*1024,)*2),
+      mock.call(resource.RLIMIT_NPROC,(32,32))])
+  def test_existing_soft_and_hard_limits_are_never_raised(self):
+    inherited={resource.RLIMIT_CPU:(10,30),resource.RLIMIT_AS:(256*1024*1024,resource.RLIM_INFINITY),
+               resource.RLIMIT_FSIZE:(resource.RLIM_INFINITY,)*2,resource.RLIMIT_NPROC:(8,16)}
+    self.getlimit.side_effect=lambda kind:inherited[kind]
+    self.run_setup()
+    self.assertEqual(self.setlimit.call_args_list,[
+      mock.call(resource.RLIMIT_CPU,(10,10)),mock.call(resource.RLIMIT_AS,(256*1024*1024,)*2),
+      mock.call(resource.RLIMIT_FSIZE,(32*1024*1024,)*2),mock.call(resource.RLIMIT_NPROC,(8,8))])
+  def test_failed_drop_exits_with_stage_and_never_reaches_limits(self):
+    class ChildExit(BaseException): pass
+    self.uid.side_effect=PermissionError(1,'Operation not permitted')
+    with mock.patch.object(builder.os,'write') as write, mock.patch.object(builder.os,'_exit',side_effect=ChildExit) as stop:
+      with self.assertRaises(ChildExit): self.run_setup()
+    stop.assert_called_once_with(125)
+    self.assertIn(b'compiler child setup failed at setuid: PermissionError',write.call_args.args[1])
+    self.setlimit.assert_not_called()
+  def test_failed_limit_or_diagnostic_write_still_exits(self):
+    class ChildExit(BaseException): pass
+    for output_failure in (None,OSError('closed stderr')):
+      with self.subTest(output_failure=output_failure):
+        self.setlimit.side_effect=ValueError('injected limit failure')
+        with mock.patch.object(builder.os,'write',side_effect=output_failure) as write, mock.patch.object(builder.os,'_exit',side_effect=ChildExit) as stop:
+          with self.assertRaises(ChildExit): self.run_setup()
+        stop.assert_called_once_with(125)
+        self.assertIn(b'compiler child setup failed at RLIMIT_CPU: ValueError',write.call_args.args[1])
 if __name__=='__main__': unittest.main()

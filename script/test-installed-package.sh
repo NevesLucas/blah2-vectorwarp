@@ -104,6 +104,14 @@ else
 fi
 podman cp "$source_root/test/packaging/installed_reinstall_test.py" "$container:/tmp/installed_reinstall_test.py"
 podman exec "$container" python3 /tmp/installed_reinstall_test.py "/tmp/package.$format" >"$evidence/reinstall.log" 2>&1
+podman cp "$source_root/test/packaging/sdrplay_child_setup_test.py" "$container:/tmp/sdrplay_child_setup_test.py"
+# This imports the installed helper and derives its sandbox from the installed
+# unit.  It creates no SDK files or adapter output; keep its journal evidence
+# before subsequent service tests make the package-test journal noisy.
+podman exec "$container" python3 /tmp/sdrplay_child_setup_test.py \
+  --helper /opt/vectorwarp/libexec/vectorwarp-build-sdrplay \
+  --unit "$(podman exec "$container" systemctl show --property=FragmentPath --value vectorwarp-sdrplay-build.service)" \
+  --build-user vectorwarp-build >"$evidence/sdrplay-child-setup.log" 2>&1
 podman cp "$source_root/test/recording/processor_replay_test.py" "$container:/tmp/processor_replay_test.py"
 podman cp "$source_root/test/packaging/installed_service_test.py" "$container:/tmp/installed_service_test.py"
 podman exec "$container" python3 /tmp/installed_service_test.py >"$evidence/services.log" 2>&1

@@ -62,6 +62,8 @@ jobs:
           python3 script/collect-macos-standalone-provenance.py --runtime "$GITHUB_WORKSPACE/build/standalone runtime" --cellar "$(brew --cellar)" --output "$provenance/inventory.json" --notices-dir "$provenance/notices"
           node api/macos-receiver-management.test.js
           node api/macos-platform.test.js
+          node api/macos-rspduo-build.test.js
+          node api/macos-local-apply.test.js
           python3 test/macos/license_inventory_test.py
           python3 test/macos/standalone_provenance_test.py
           python3 test/macos/standalone_launcher_test.py

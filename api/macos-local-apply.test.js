@@ -43,7 +43,7 @@ async function eventually(check) {
     fs.writeFileSync(path.join(root, 'receiver-source/rspduo/kit.json'), JSON.stringify(manifest));
     const receipt = {...manifest, module_sha256:hash(fs.readFileSync(moduleFile)),
       sdk:{include:hash(fs.readFileSync(path.join(include,'sdrplay_api.h'))), library:hash(fs.readFileSync(library))}};
-    fs.writeFileSync(builder, `#!${process.execPath}\nconst fs=require('fs');fs.writeFileSync(${JSON.stringify(marker)},'started');setTimeout(()=>{fs.writeFileSync(${JSON.stringify(receiptFile)},${JSON.stringify(JSON.stringify(receipt))});console.log('built');},1500);\n`);
+    fs.writeFileSync(builder, `#!${process.execPath}\nconst fs=require('fs');const marker=${JSON.stringify(marker)};const pending=marker+'.next';fs.writeFileSync(pending,JSON.stringify({env:process.env}));fs.renameSync(pending,marker);setTimeout(()=>{fs.writeFileSync(${JSON.stringify(receiptFile)},${JSON.stringify(JSON.stringify(receipt))});console.log('built');},1500);\n`);
     fs.chmodSync(builder, 0o755);
     const config = setupDefaults(); config.network.ip = '127.0.0.1';
     const listeners = await Promise.all(Object.keys(config.network.ports).map(() => new Promise(resolve => {
@@ -58,6 +58,9 @@ async function eventually(check) {
       BLAH2_PREVIEW:'false', BLAH2_RECEIVER_TYPES:'Usrp,HackRF,Kraken',
       VECTORWARP_MACOS_ROOT:root,VECTORWARP_MACOS_STATE:state,VECTORWARP_MACOS_RSPDUO_BUILD:builder,
       VECTORWARP_MACOS_NODE:process.execPath,BLAH2_SDRPLAY_INCLUDE_DIR:include,BLAH2_SDRPLAY_LIBRARY:library,
+      // These are Linux build-service values.  A Darwin request must select
+      // the co-staged local builder and must not pass service state to it.
+      BLAH2_SDRPLAY_BUILD_HELPER:'/definitely-not-a-macos-builder', BLAH2_SDRPLAY_LOCAL_BUILD:'true', NOTIFY_SOCKET:'/run/systemd/notify',
       BLAH2_CONFIG_RESTART_COMMAND:JSON.stringify([process.execPath,'-e',`require('fs').writeFileSync(${JSON.stringify(restarted)},'yes')`])},stdio:['ignore','ignore','pipe']});
     child.stderr.on('data',value=>{errors+=value;});
     const capabilities = async () => (await request('GET','/api/config/capabilities')).body;
@@ -68,6 +71,13 @@ async function eventually(check) {
     assert.equal((await request('POST','/api/sdrplay-build',{command:'anything'},'sdrplay-local-build-v1')).status,422);
     const building = request('POST','/api/sdrplay-build',{},'sdrplay-local-build-v1');
     await eventually(()=>fs.existsSync(marker));
+    const buildEnvironment = JSON.parse(fs.readFileSync(marker, 'utf8')).env;
+    assert.equal(buildEnvironment.BLAH2_SDRPLAY_INCLUDE_DIR, include);
+    assert.equal(buildEnvironment.BLAH2_SDRPLAY_LIBRARY, library);
+    assert.equal(buildEnvironment.VECTORWARP_MACOS_ROOT, root);
+    assert.equal(buildEnvironment.VECTORWARP_MACOS_STATE, state);
+    for (const name of ['BLAH2_SDRPLAY_BUILD_HELPER', 'BLAH2_SDRPLAY_LOCAL_BUILD', 'NOTIFY_SOCKET'])
+      assert.equal(buildEnvironment[name], undefined, `macOS builder must not inherit Linux build-service value ${name}`);
     assert.equal((await request('PUT','/api/config?restart=false',config)).status,409,
       'Config writes must not race the local adapter build');
     const built = await building; assert.equal(built.status,200,JSON.stringify(built.body));

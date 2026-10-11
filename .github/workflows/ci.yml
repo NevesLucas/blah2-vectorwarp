@@ -36,6 +36,12 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             build-essential cmake curl git pkg-config python3-yaml tar unzip xz-utils zip \
             apt-utils createrepo-c gnupg libarmadillo-dev libfftw3-dev rpm
+      - name: Exercise SDRplay compiler privilege drop under systemd (no vendor SDK)
+        run: |
+          sudo python3 test/packaging/sdrplay_child_setup_test.py \
+            --helper script/vectorwarp-build-sdrplay.py \
+            --unit contrib/systemd/vectorwarp-sdrplay-build.service.in \
+            --build-user nobody
       - name: Bootstrap pinned vcpkg manifest dependencies
         run: |
           git clone --filter=blob:none https://github.com/microsoft/vcpkg.git build/ci-deps/vcpkg

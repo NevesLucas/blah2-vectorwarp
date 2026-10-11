@@ -9,7 +9,8 @@ const {createMacRspduoBuild} = require('./macos-rspduo-build');
 
 (async () => {
   const calls = [];
-  const env = {VECTORWARP_MACOS_RSPDUO_BUILD: '/opt/vectorwarp/libexec/build-rspduo', VECTORWARP_MACOS_ROOT: '/opt/vectorwarp', VECTORWARP_MACOS_STATE: '/Users/test/Library/Application Support/VectorWarp', VECTORWARP_MACOS_NODE: '/opt/homebrew/bin/node', BLAH2_SDRPLAY_INCLUDE_DIR: '/sdk/include', BLAH2_SDRPLAY_LIBRARY: '/sdk/libsdrplay_api.dylib'};
+  const env = {VECTORWARP_MACOS_RSPDUO_BUILD: '/opt/vectorwarp/libexec/build-rspduo', VECTORWARP_MACOS_ROOT: '/opt/vectorwarp', VECTORWARP_MACOS_STATE: '/Users/test/Library/Application Support/VectorWarp', VECTORWARP_MACOS_NODE: '/opt/homebrew/bin/node', BLAH2_SDRPLAY_INCLUDE_DIR: '/sdk/include', BLAH2_SDRPLAY_LIBRARY: '/sdk/libsdrplay_api.dylib',
+    BLAH2_SDRPLAY_BUILD_HELPER: '/opt/vectorwarp/libexec/vectorwarp-build-sdrplay', BLAH2_SDRPLAY_LOCAL_BUILD: 'true', NOTIFY_SOCKET: '/run/systemd/notify'};
   const build = createMacRspduoBuild({env, exists: file => ['/opt/vectorwarp/libexec/build-rspduo', '/sdk/include/sdrplay_api.h', '/sdk/libsdrplay_api.dylib'].includes(file), run: (file, args, options, done) => { calls.push({file,args,options}); done(null); }});
   assert.equal(build.status().ok, true);
   await build.start();
@@ -17,6 +18,9 @@ const {createMacRspduoBuild} = require('./macos-rspduo-build');
   assert.equal(calls[0].file, env.VECTORWARP_MACOS_RSPDUO_BUILD);
   assert.equal(calls[0].options.env.BLAH2_SDRPLAY_LIBRARY, env.BLAH2_SDRPLAY_LIBRARY);
   assert.equal(calls[0].options.env.VECTORWARP_MACOS_STATE, env.VECTORWARP_MACOS_STATE);
+  assert.equal(calls[0].options.uid, undefined);
+  assert.equal(calls[0].options.gid, undefined);
+  assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['BLAH2_SDRPLAY_INCLUDE_DIR', 'BLAH2_SDRPLAY_LIBRARY', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'VECTORWARP_MACOS_NODE', 'VECTORWARP_MACOS_ROOT', 'VECTORWARP_MACOS_STATE']);
   assert.equal(createMacRspduoBuild({env: {}, exists: () => false}).status().state, 'unavailable');
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'vectorwarp-rsp-status-'));
   try {

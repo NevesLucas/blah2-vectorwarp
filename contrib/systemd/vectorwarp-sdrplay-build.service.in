@@ -34,6 +34,9 @@ RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETUID CAP_KILL
+# systemd's seccomp setup otherwise drops SETUID even from this root helper.
+# The compiler's setuid() clears its permitted/effective/ambient capabilities.
+AmbientCapabilities=CAP_SETUID
 RestrictAddressFamilies=AF_UNIX
 InaccessiblePaths=-/etc/vectorwarp -/etc/vectorwarp-management -/var/lib/vectorwarp -/var/lib/vectorwarp-api
 ReadWritePaths=/var/lib/vectorwarp-adapters /run/vectorwarp-sdrplay-build /run/vectorwarp-rspduo-build.lock
