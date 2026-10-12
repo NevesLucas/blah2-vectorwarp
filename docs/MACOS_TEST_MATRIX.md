@@ -1,12 +1,22 @@
 # macOS verification and remaining hardware coverage
 
-The [October 2026 Kraken Suite update](KRAKEN_SUITE_UPDATE_2026_10.md) has separate
-software-only evidence for upstream `f648514df41d`: all seven native simulation
-scenarios on Apple M2 and Fedora 44 x86_64, first-party receiver socket tests on
-both platforms, and the Mac API/lifecycle path using the updated companion.
-No receiver was attached for that update. The historical physical and hosted CI
-results below apply to their recorded earlier revisions; they do not qualify
-the October source pin on hardware, Intel Mac or Linux ARM.
+The [October 2026 Kraken Suite update](KRAKEN_SUITE_UPDATE_2026_10.md) uses
+upstream `f648514df41d` and the reviewed companion patches. Head `ca8cbadb` passed
+24 hosted software checks with three intentional publication skips, including
+all seven native simulation cases on Mac arm64/x86_64 and Linux x86_64/ARM64.
+These results predate the subsequent VectorWarp AUTO command-sequence change;
+that client change needs its own hosted qualification.
+
+The local M2 subsequently passed bounded five-channel USB/manual settings and
+CPU/API tests. With the new antenna array connected as reported by the user,
+three AUTO changes followed by Suite's existing full-recalibration command and
+one unchanged periodic check passed on the original receiver build. No native
+calibration timing change was adopted. The subsequent actual Node control-client
+test also passed manual-to-AUTO gain and AUTO retuning with fresh five-channel
+output, followed by complete cleanup. This is finite control/native USB evidence;
+it is not a new browser/HTTP/CPU/GPU run or a measurement of external RF coherence,
+antenna geometry, long-term drift or physical Linux/Intel Mac hardware.
+Historical results below apply to their recorded revisions.
 
 Standalone installer development is separate from the accepted Homebrew/source
 matrix below. Local Apple Silicon testing has verified relocation of 142 native

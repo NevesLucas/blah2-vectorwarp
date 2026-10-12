@@ -150,11 +150,13 @@ function operationList(status, wanted) {
     id: 'set_frequency', field: 'capture.fc', value: wanted.frequency,
     command: {command: 'set_frequency', frequency: wanted.frequency},
     acknowledgementField: 'frequency',
+    fullResetAfterAck: status.gain === -1 && (wanted.gain === undefined || wanted.gain === -1),
     matches: observed => observed.centerFrequency === wanted.frequency
   });
   if (wanted.gain !== undefined && status.gain !== wanted.gain) operations.push({
     id: 'set_gain', field: 'capture.device.heimdall.gain', value: wanted.gain,
     command: {command: 'set_gain', gain: wanted.gain}, acknowledgementField: 'gain',
+    fullResetAfterAck: wanted.gain === -1 && status.gain !== -1,
     matches: observed => observed.gain === wanted.gain
   });
   if (status.channelCount !== wanted.channelCount) operations.push({
@@ -222,6 +224,10 @@ function createKrakenControlClient(options = {}) {
       let currentSent = false;
       let waitingForIdle = false;
       let expectedReadback = null;
+      let scannerPending = false;
+      let lastFrame = null;
+      let resetSent = false, resetAcknowledged = false, resetRejected = false;
+      let resetAfterStatus = 0, recoveryAfterStatus = 0;
       let acknowledgedAfterStatus = 0;
       let statusSequence = 0;
       const receipt = createReceipt(endpoint, wanted, null);
@@ -242,7 +248,10 @@ function createKrakenControlClient(options = {}) {
           acknowledged: currentSent && currentAcknowledged,
           commandOutcome: !currentSent ? 'not-sent' : currentRejected ? 'rejected' :
             currentAcknowledged ? 'acknowledged' : 'unknown',
-          readbackMatched: false}] : [];
+          readbackMatched: false,
+          ...(current.fullResetAfterAck ? {fullRecalibration: {commandSent: resetSent,
+            acknowledged: resetAcknowledged, rejected: resetRejected,
+            recoveryObserved: recoveryAfterStatus > 0, completed: false}} : {})}] : [];
         const status = receipt.operations.length || currentAcknowledged ? 'partial' :
           currentSent && !currentRejected ? 'indeterminate' : 'failed';
         return {...receipt,
@@ -273,10 +282,25 @@ function createKrakenControlClient(options = {}) {
       };
       const suiteIdle = observed => observed && !observed.reconfiguring &&
         !observed.recovering && !observed.cooldownActive;
+      const validateRecoveryStatus = (frame, observed) => {
+        if (observed.operatingMode !== 'coherent' || observed.sampleRate !== wanted.sampleRate ||
+            observed.channelCount !== initialStatus.channelCount || observed.reconfiguring)
+          throw receiverError('KRAKEN_STATUS_DRIFT', 'Suite mode, sample rate or channel count changed during planned AUTO recovery.', 409);
+        if (frame.kerberos_mode === true || frame.external_noise === true)
+          throw receiverError('KRAKEN_RESET_UNSUPPORTED', 'Automatic recovery requires the normal internal-noise Kraken workflow.', 409);
+        if (typeof frame.recovering !== 'boolean' || typeof frame.cooldown_active !== 'boolean' ||
+            (frame.kerberos_mode !== undefined && typeof frame.kerberos_mode !== 'boolean') ||
+            (frame.external_noise !== undefined && typeof frame.external_noise !== 'boolean') ||
+            (frame.noise_source !== undefined && typeof frame.noise_source !== 'boolean') ||
+            (frame.phase_state !== undefined && !Number.isInteger(frame.phase_state)) ||
+            (frame.calibration_state !== undefined && !['PENDING', 'CONVERGED', 'FAILED'].includes(frame.calibration_state)))
+          throw receiverError('KRAKEN_PROTOCOL_MISMATCH', 'Suite omitted or malformed required AUTO recovery status.', 502);
+      };
       const sendCurrent = () => {
+        if (current.fullResetAfterAck) validateRecoveryStatus(lastFrame, lastStatus);
         expectedReadback = {frequency: lastStatus.centerFrequency,
           channelCount: lastStatus.channelCount,
-          gain: wanted.gain === undefined ? undefined : lastStatus.gain};
+          gain: wanted.gain === undefined && !current.fullResetAfterAck ? undefined : lastStatus.gain};
         if (current.id === 'set_frequency') expectedReadback.frequency = current.value;
         if (current.id === 'set_gain') expectedReadback.gain = current.value;
         if (current.id === 'set_num_elements') expectedReadback.channelCount = current.value;
@@ -296,6 +320,8 @@ function createKrakenControlClient(options = {}) {
         currentRejected = false;
         currentSent = false;
         expectedReadback = null;
+        resetSent = resetAcknowledged = resetRejected = false;
+        resetAfterStatus = recoveryAfterStatus = 0;
         if (!current) return finish();
         if (!suiteIdle(lastStatus)) {
           waitingForIdle = true;
@@ -308,7 +334,10 @@ function createKrakenControlClient(options = {}) {
       const acceptReadback = () => {
         receipt.operations.push({operation: current.id, field: current.field,
           requested: current.value, commandSent: true, commandOutcome: 'acknowledged',
-          acknowledged: true, readbackMatched: true});
+          acknowledged: true, readbackMatched: true,
+          ...(current.fullResetAfterAck ? {fullRecalibration: {commandSent: true,
+            acknowledged: true, recoveryObserved: true, completed: true,
+            verification: 'reported recovery completion; no RF measurement'}} : {})});
         current = null;
         currentAcknowledged = false;
         next();
@@ -321,6 +350,7 @@ function createKrakenControlClient(options = {}) {
         const observed = normalizeStatus(frame);
         statusSequence += 1;
         lastStatus = observed;
+        lastFrame = frame;
         if (!initialStatus) {
           initialStatus = observed;
           receipt.before = publicStatus(observed);
@@ -331,7 +361,23 @@ function createKrakenControlClient(options = {}) {
           if (readOnly && operations.length)
             return fail(receiverError('KRAKEN_STARTUP_MISMATCH',
               'Suite settings differ from saved receiver settings. Apply them before starting live processing.', 409));
+          if (operations.some(operation => operation.fullResetAfterAck)) {
+            validateRecoveryStatus(frame, observed);
+            scannerPending = true;
+            arm(statusTimeoutMs, 'Suite V2 did not report scanner state before planned recovery.', 'KRAKEN_STATUS_TIMEOUT');
+            socket.write(`${JSON.stringify({command: 'get_scanner_status'})}\n`);
+            return;
+          }
           return next();
+        }
+        if (scannerPending) return;
+        if (current?.fullResetAfterAck && resetSent) {
+          validateRecoveryStatus(frame, observed);
+          if (resetAcknowledged && statusSequence > acknowledgedAfterStatus && observed.recovering && current.matches(observed) &&
+              matchesTuple(observed, expectedReadback.frequency, expectedReadback.channelCount, expectedReadback.gain))
+            recoveryAfterStatus ||= statusSequence;
+          if (recoveryAfterStatus && frame.calibration_state === 'FAILED')
+            return fail(receiverError('KRAKEN_CALIBRATION_FAILED', 'Suite full recalibration reported FAILED. The config was not saved.', 409));
         }
         if (waitingForIdle) {
           if (!suiteIdle(observed)) return;
@@ -339,11 +385,33 @@ function createKrakenControlClient(options = {}) {
           return sendCurrent();
         }
         if (current && currentAcknowledged && statusSequence > acknowledgedAfterStatus &&
+            (!current.fullResetAfterAck || (resetAcknowledged && recoveryAfterStatus > 0 &&
+              statusSequence > recoveryAfterStatus && suiteIdle(observed) && frame.noise_source !== true &&
+              (frame.phase_state === undefined || frame.phase_state === 4) &&
+              (frame.calibration_state === undefined || frame.calibration_state === 'CONVERGED'))) &&
             current.matches(observed) && matchesTuple(observed, expectedReadback.frequency,
               expectedReadback.channelCount, expectedReadback.gain))
           acceptReadback();
       };
       const handleResponse = frame => {
+        if (scannerPending) {
+          if (frame.status !== 'success' || frame.enabled !== false)
+            return fail(receiverError('KRAKEN_RESET_UNSUPPORTED', 'Planned AUTO recovery requires an explicitly disabled scanner.', 409));
+          scannerPending = false;
+          receipt.scannerPreflight = {enabled: false, atomicOwnershipGuaranteed: false};
+          return next();
+        }
+        if (current?.fullResetAfterAck && resetSent) {
+          if (frame.status !== 'success') {
+            resetRejected = true;
+            return fail(receiverError('KRAKEN_COMMAND_REJECTED', 'Suite rejected the planned full recalibration.', 409));
+          }
+          if (resetAcknowledged || frame.message !== 'Full recalibration (lag + phase) started')
+            return fail(receiverError('KRAKEN_ACKNOWLEDGEMENT_MISMATCH', 'Suite did not acknowledge the planned full recalibration.', 502));
+          resetAcknowledged = true;
+          acknowledgedAfterStatus = statusSequence;
+          return;
+        }
         if (!current || !currentSent) return fail(receiverError('KRAKEN_UNEXPECTED_RESPONSE',
           'Suite V2 responded before a command was sent.', 502));
         if (frame.status !== 'success') {
@@ -366,6 +434,12 @@ function createKrakenControlClient(options = {}) {
         currentAcknowledged = true;
         // A status received before this exact ACK is never its readback.
         acknowledgedAfterStatus = statusSequence;
+        if (current.fullResetAfterAck) {
+          validateRecoveryStatus(lastFrame, lastStatus);
+          resetSent = true;
+          resetAfterStatus = statusSequence;
+          socket.write(`${JSON.stringify({command: 'reset_lag_compensation'})}\n`);
+        }
       };
       const handleLine = line => {
         if (!line.trim()) return;
@@ -436,7 +510,7 @@ function receiverAcceptanceBoundary(config) {
       upstream: ['capture.fc', 'capture.fs', 'capture.device.channel_count', 'Suite gain and hardware serial order'],
       vectorwarp: ['capture.device.heimdall', 'capture.device.reference_channel',
         'capture.device.surveillance_channels', 'process.reference_synthesis']
-    }, writePath: 'Suite V2 TCP control for frequency and active element count only',
+    }, writePath: 'Suite V2 TCP control for frequency, gain and active element count, with conditional existing full recalibration',
     acknowledgement: 'command response plus a subsequent Suite status broadcast',
     upstreamReadback: true,
     hardwareReadback: false, physicalReceiverVerified: false};

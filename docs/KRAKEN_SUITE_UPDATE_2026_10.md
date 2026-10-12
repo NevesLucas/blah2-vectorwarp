@@ -25,6 +25,21 @@ companion previously used `a541354bc4fa02261cb521d98937842591e8ce27`.
   device-setting errors. Noise transitions, acquisition epochs, filter-history
   reset and shutdown ownership checks remain enforced.
 
+When VectorWarp settings synchronization switches manual gain to AUTO, it asks
+Suite to perform its existing full recalibration after the gain command is
+acknowledged. Retuning while AUTO remains selected uses the same sequence,
+including when gain is set to Keep. A disabled scanner and normal coherent,
+internal-noise operation are required. The client sends one reset, waits for its
+acknowledgment, then requires newly reported recovery and later completion.
+Failure or timeout prevents the configuration save; it does not retry the reset
+or silently substitute manual gain. Manual-gain and unchanged settings retain
+their existing behavior.
+
+This uses Suite's supported control interface without changing its calibration
+timing, accuracy thresholds or gain algorithm. Stock Linux status messages are
+supported: the client checks additional calibration fields when present but does
+not treat absent fields as physical calibration measurements.
+
 Kraken's experimental ADS-B/AIS tracking and viewshed interface are separate
 upstream applications. This compatibility work does not add those interfaces
 to VectorWarp.
@@ -58,16 +73,44 @@ updated companion and current source API/lifecycle with the existing installed
 Homebrew revision 17 processor. The new frame-decoder changes were compiled and
 tested separately; the full processor was not rebuilt for this local check.
 
-Hosted Linux ARM and Intel Mac checks have not run for this update.
-Existing historical physical and CI results in the macOS test matrix apply to
-their recorded earlier source revisions.
+Compatibility revision `ca8cbadb` passed 24 hosted checks, including native
+simulations on Linux x86_64/ARM64 and macOS arm64/x86_64, both standalone Mac
+runtimes and all 11 Linux package targets. Three publication jobs intentionally
+skipped the draft PR. Those results predate the VectorWarp AUTO command change;
+that change requires its own hosted qualification.
 
 The receiver-update catalog acknowledges this reviewed source identity. As with
 other catalog entries, that acknowledgement is not a hardware compatibility
 claim; the software results and limits are recorded here.
 
-No Kraken was attached for this work. These tests do not establish physical USB
-throughput, RF coherence, oscillator drift, real gain behavior or antenna results.
+Later physical tests on the Apple M2 exercised all five USB channels, manual
+gain, retuning, recovery and the controller-to-CPU-to-API settings path. Six
+API/settings phases each produced 19 fresh finite map observations. Two whole
+frame drops and two frequency-mismatch messages occurred at retune handovers;
+this is not a zero-loss result.
+
+AUTO calibration failed with both the prior receiver version and the updated
+Suite, including with the new antenna array connected. Measurements showed phase
+motion continuing beyond the upstream 250 ms readiness gate. Rather than adopt
+a native timing patch, we tested Suite's existing full-recalibration command
+immediately after each AUTO acknowledgment. Three transitions passed with fresh
+five-channel output, each taking about five seconds. The unchanged periodic
+check also passed: eight snapshots over 1.16 seconds, worst per-channel mean
+absolute residuals of 3.90 degrees and 0.0147 samples. The complete directed test
+took 61 seconds, used about 96 MiB of receiver memory and shut down cleanly.
+
+A subsequent 45-second physical test used the actual VectorWarp Node control
+client. Manual-to-AUTO gain and retuning with gain set to Keep both passed in
+about five seconds each, with acknowledged recovery, newer converged status and
+fresh valid five-channel output. Both client calls exited successfully; final
+manual restoration and all-channel shutdown passed. The API test suite also
+passed, including the new recovery protocol cases. This exercised the control
+client directly, not a browser/HTTP session or a new CPU/GPU radar run.
+
+These results do not establish AUTO convergence without a reset,
+external RF coherence after switching back to the antennas, antenna geometry,
+bearing/target accuracy, long-term drift or physical Linux/Intel Mac behavior.
+Full hardware acceptance and user approval remain required before merge/release.
 The fake driver has no USB implementation. Linux tests first compile the real
 static-driver target without executing it, then explicitly relink native objects
 with the fake driver and verify hashes, link maps and loader dependencies before

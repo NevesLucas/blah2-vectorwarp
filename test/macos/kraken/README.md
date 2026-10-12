@@ -96,3 +96,22 @@ doubles for its hardware side effects. It requires the caller's
 retry budget without declaring convergence, latches failure and disables noise,
 and proves zero-phase and inclusive 1-degree observations require all four
 successful readings. The test accepts `CXX` for a portable host compiler.
+
+
+`api/receiver-sync-auto.test.js` exercises the VectorWarp control client with
+loopback protocol fixtures. Together with the existing protocol tests, it covers AUTO acknowledgment followed by exactly
+one supported full recalibration, strict acknowledgment/recovery ordering,
+rejected/stale/failed responses, stock Linux status without optional calibration
+fields, unsupported modes/scanning, AUTO retuning, and unchanged/manual settings.
+It runs through the normal API test command on Linux and Mac CI. These protocol
+fixtures do not measure RF or replace the native simulated-driver tests above.
+
+On the original native build, a separate M2 USB test passed three manual-to-AUTO
+changes followed by the existing full-recalibration command and one periodic
+check. The user reported the new antenna array connected. That result supports
+the command sequence. A subsequent bounded physical test of the actual Node
+synchronizer passed manual-to-AUTO gain and AUTO retuning with gain Keep,
+independently observed fresh recovery and five-channel output, and complete
+shutdown. It does not establish browser/HTTP or CPU/GPU performance, external RF
+coherence or physical Linux/Intel Mac behavior. No native calibration timing
+patch was adopted.
