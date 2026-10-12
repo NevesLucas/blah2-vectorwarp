@@ -98,7 +98,13 @@ def main():
                      'test/macos/kraken/gain_oracle_test.py'):
             run([sys.executable, ROOT / test, '--source', driver_source])
         run([sys.executable, ROOT / 'test/macos/kraken/convergence_oracle_test.py', '--source', native])
+        run([sys.executable, ROOT / 'test/macos/kraken/watchdog_oracle_test.py', '--source', native])
         run([sys.executable, ROOT / 'test/macos/kraken/tcp_data_send_test.py', '--source', native])
+        run([sys.executable, ROOT / 'test/macos/kraken/tcp_data_backpressure_test.py', '--source', native])
+        run([sys.executable, ROOT / 'test/macos/kraken/socket_lifecycle_test.py', '--source', native])
+        run([sys.executable, ROOT / 'test/macos/kraken/control_reader_test.py'])
+        run([sys.executable, ROOT / 'test/macos/kraken/driver_events_test.py'])
+        run([sys.executable, ROOT / 'test/macos/kraken/shutdown_process_test.py'])
     prefix = work / 'driver'
     common = ['-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', f'-DCMAKE_PREFIX_PATH={brew}']
     run(['cmake', '-S', driver_source, '-B', work / 'driver-build', *common,

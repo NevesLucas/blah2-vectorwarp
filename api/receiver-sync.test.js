@@ -303,6 +303,21 @@ async function rejected(promise, code, pattern) {
     assert.deepEqual(wideband.commands, []);
   } finally { await wideband.close(); }
 
+  // Latest Suite exposes independent-tuner mode in the same status field as
+  // wideband.  It is a valid Suite status but not coherent capture, so report
+  // a mode refusal before writing any control command.
+  const independentState = {frequency: 204640000, sampleRate: 2400000,
+    channels: 5, maximum: 8, reconfiguring: false, mode: 'independent'};
+  const independent = await simulatedSuite(independentState, () => {
+    assert.fail('Independent mode must be rejected before sending a command.');
+  });
+  try {
+    await rejected(createKrakenControlClient({statusTimeoutMs: 100,
+      readbackTimeoutMs: 100}).synchronize(config(independent.port,
+      {capture: {fc: 205000000}})), 'KRAKEN_MODE_MISMATCH', /independent mode/);
+    assert.deepEqual(independent.commands, []);
+  } finally { await independent.close(); }
+
   const rangeState = {frequency: 204640000, sampleRate: 2400000,
     channels: 5, maximum: 8, reconfiguring: false};
   const outOfRange = await simulatedSuite(rangeState, () => {

@@ -6,9 +6,19 @@ verbatim from the patched native implementation; doubles record its hardware
 side effects. This makes exhaustion of the retry budget deterministic.
 """
 import argparse
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+
+
+def cxx():
+    """Use an explicit CXX when supplied, otherwise a host C++ compiler."""
+    requested = os.environ.get('CXX')
+    if requested:
+        return requested
+    return shutil.which('clang++') or shutil.which('g++') or 'c++'
 
 
 def main():
@@ -16,6 +26,8 @@ def main():
     parser.add_argument('--source', type=Path, required=True, help='Heimdall_v2 source directory')
     args = parser.parse_args()
     source = (args.source / 'src/dsp/compensation.cpp').read_text()
+    if 'correlation_result.phases_measured' not in source:
+        raise RuntimeError('source lacks the phases_measured gate for real eigen observations')
     begin = source.index('bool check_phase_convergence(')
     end = source.index('std::optional<PhaseCompensatorState> get_phase_compensation_state()', begin)
     body = source[begin:end]
@@ -45,7 +57,7 @@ struct Phase {
   std::mutex state_mutex;
   int checks_since_compensation=0, convergence_count=0, failed_convergence_attempts=0;
   int required_convergence_readings=4, max_checks_before_recompensate=10, max_convergence_attempts=3;
-  float convergence_threshold_degrees=1.0f, amplitude_tolerance_db=2.0f;
+  float convergence_threshold_degrees=1.0f;
   PhaseCompensatorState state=PhaseCompensatorState::VERIFYING;
   Vector compensation_vector;
 };
@@ -70,30 +82,31 @@ void reset() {
 '''
     checks = r'''
 int main() {
-  for (int mode=0; mode<2; ++mode) {
-    reset();
-    std::map<int,float> phases{{0,0},{1,mode ? 0.0f : 1.01f},{2,0},{3,0},{4,0}};
-    std::map<int,float> amplitudes{{0,1},{1,mode ? std::pow(10.0f,2.01f/20.0f) : 1.0f},{2,1},{3,1},{4,1}};
-    const int budget=phase_compensation->max_checks_before_recompensate*phase_compensation->max_convergence_attempts;
-    for (int i=0; i<budget; ++i) require(!check_phase_convergence(phases,amplitudes), "failed residual declared converged");
-    require(converged==0 && calibration_failed.load(), "exhausted retry must latch calibration failure");
-    require(noise_off==1 && !fft_control.fft_enabled && !recovery_in_progress.load(), "failure must disable noise and finish recovery");
-    require(phase_compensation->state!=PhaseCompensatorState::CONVERGED && !phase_compensation->convergence_check_active.load(), "failure left a converged or active state");
-    require(flushes==phase_compensation->max_convergence_attempts-1, "retry budget was not exercised");
-  }
   reset();
-  std::map<int,float> phases{{0,0},{1,1.0f},{2,-1.0f},{3,0},{4,0}};
-  std::map<int,float> amplitudes{{0,1},{1,std::pow(10.0f,1.9f/20.0f)},{2,1},{3,1},{4,1}};
-  for(int i=0;i<phase_compensation->required_convergence_readings-1;++i)
-    require(!check_phase_convergence(phases,amplitudes), "converged before required readings");
-  require(check_phase_convergence(phases,amplitudes) && converged==1 && !calibration_failed.load(), "valid threshold measurements failed");
-  std::cout << "Native convergence oracle PASS: phase/amplitude retry exhaustion stays failed; valid boundary converges\n";
+  std::map<int,float> failed{{0,0},{1,1.01f},{2,0},{3,0},{4,0}};
+  const int budget=phase_compensation->max_checks_before_recompensate*phase_compensation->max_convergence_attempts;
+  for (int i=0; i<budget; ++i) require(!check_phase_convergence(failed), "failed phase residual declared converged");
+  require(converged==0 && calibration_failed.load(), "exhausted retry must latch calibration failure");
+  require(noise_off==1 && !fft_control.fft_enabled && !recovery_in_progress.load(), "failure must disable noise and finish recovery");
+  require(phase_compensation->state!=PhaseCompensatorState::CONVERGED && !phase_compensation->convergence_check_active.load(), "failure left a converged or active state");
+  require(flushes==phase_compensation->max_convergence_attempts-1, "retry budget was not exercised");
+
+  // A true zero-phase observation and the inclusive 1-degree limit are valid.
+  // The caller's phases_measured gate distinguishes observations from defaults.
+  for (float residual : {0.0f, 1.0f}) {
+    reset();
+    std::map<int,float> phases{{0,0},{1,residual},{2,0},{3,0},{4,0}};
+    for(int i=0;i<phase_compensation->required_convergence_readings-1;++i)
+      require(!check_phase_convergence(phases), "converged before required readings");
+    require(check_phase_convergence(phases) && converged==1 && !calibration_failed.load(), "valid phase measurements failed");
+  }
+  std::cout << "Native convergence oracle PASS: phase retry exhaustion stays failed; zero and 1-degree observations converge\n";
 }
 '''
     with tempfile.TemporaryDirectory(prefix='vectorwarp-convergence-') as directory:
         path = Path(directory)
         (path / 'oracle.cpp').write_text(prelude + body + checks)
-        subprocess.run(['xcrun', 'clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+        subprocess.run([cxx(), '-std=c++17', '-Wall', '-Wextra', '-Werror',
                         str(path / 'oracle.cpp'), '-o', str(path / 'oracle')], check=True)
         subprocess.run([str(path / 'oracle')], check=True)
 

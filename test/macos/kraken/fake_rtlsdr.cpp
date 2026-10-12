@@ -25,6 +25,7 @@ struct rtlsdr_dev {
     std::atomic<bool> cancelled{false}, reading{false}, closed{false}, noise{false};
     std::atomic<unsigned> frequency{100000000}, rate{2400000};
     std::atomic<int> gain{496};
+    std::atomic<int> if_vga_mode{-1};
     std::atomic<int> correction{0};
     std::atomic<unsigned> stale_noise_remaining{0};
     std::atomic<long long> stale_noise_ready_ns{0};
@@ -151,6 +152,12 @@ int rtlsdr_set_center_freq(rtlsdr_dev_t* dev, uint32_t frequency) {
 }
 uint32_t rtlsdr_get_center_freq(rtlsdr_dev_t* dev) { return dev->frequency.load(); }
 int rtlsdr_set_tuner_gain_mode(rtlsdr_dev_t* dev, int) { return usable(dev, "gain_mode") ? 0 : -1; }
+int rtlsdr_set_tuner_if_mode(rtlsdr_dev_t* dev, int mode) {
+    if (!usable(dev, "if_vga") || mode < 10000 || mode > 10015) return -1;
+    dev->if_vga_mode = mode;
+    event("if_vga", dev->channel, mode);
+    return 0;
+}
 int rtlsdr_get_tuner_gains(rtlsdr_dev_t* dev, int* gains) {
     static constexpr int table[] = {0,9,14,27,37,77,87,125,144,157,166,197,207,229,
                                     254,280,297,328,338,364,372,386,402,421,434,439,445,480,496};

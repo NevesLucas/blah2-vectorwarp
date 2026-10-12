@@ -22,7 +22,8 @@ initial.network.ip = '127.0.0.1';
 
 const suiteState = {settings: {center_freq: initial.capture.fc, sample_rate: initial.capture.fs, gain: 0},
   num_channels: initial.capture.device.channel_count, max_elements: 8,
-  operating_mode: 'coherent', reconfiguring: false, recovering: false};
+  operating_mode: 'coherent', reconfiguring: false, recovering: false, cooldown_active: false};
+const suiteCommands = [];
 const suite = net.createServer(socket => {
   socket.write(`${JSON.stringify(suiteState)}\n`);
   socket.setEncoding('utf8'); let pending = '';
@@ -30,6 +31,21 @@ const suite = net.createServer(socket => {
     pending += block; const lines = pending.split('\n'); pending = lines.pop();
     for (const line of lines.filter(Boolean)) {
       const command = JSON.parse(line);
+      suiteCommands.push(command.command);
+      if (command.command === 'get_scanner_status') {
+        socket.write(`${JSON.stringify({status: 'success', enabled: false})}\n`);
+        continue;
+      }
+      if (command.command === 'reset_lag_compensation') {
+        socket.write(`${JSON.stringify({status: 'success', message: 'Full recalibration (lag + phase) started'})}\n`);
+        suiteState.recovering = true;
+        socket.write(`${JSON.stringify(suiteState)}\n`);
+        setTimeout(() => {
+          suiteState.recovering = false;
+          if (!socket.destroyed) socket.write(`${JSON.stringify(suiteState)}\n`);
+        }, 5);
+        continue;
+      }
       if (command.command === 'set_frequency') suiteState.settings.center_freq = command.frequency;
       else if (command.command === 'set_num_elements') suiteState.num_channels = command.num_elements;
       else if (command.command === 'set_gain') suiteState.settings.gain = command.gain;
@@ -126,6 +142,7 @@ function profile(name, type) {
       assert.equal(yaml.load(fs.readFileSync(filename, 'utf8')).capture.device.type, type);
     }
     for (const gain of [28.7, -1, 'keep']) {
+      const commandStart = suiteCommands.length;
       const candidate = profile('config-kraken.yml', 'Kraken');
       candidate.capture.device.heimdall.gain = gain;
       const saved = await request('PUT', '/api/config?restart=false', candidate,
@@ -133,6 +150,11 @@ function profile(name, type) {
       assert.equal(saved.status, 200, `Kraken gain ${gain}: ${JSON.stringify(saved.body)}`);
       assert.equal(saved.body.config.capture.device.heimdall.gain, gain,
         'save response must match the requested gain');
+      assert.deepEqual(suiteCommands.slice(commandStart), gain === -1 ?
+        ['get_scanner_status', 'set_gain', 'reset_lag_compensation'] : gain === 'keep' ? [] : ['set_gain']);
+      if (gain === -1) assert.equal(saved.body.receiverSync.operations[0].fullRecalibration.completed, true);
+      assert.equal(saved.body.receiverSync.calibrationVerified, false);
+      assert.equal(saved.body.receiverSync.hardwareVerified, false);
       revision = saved.body.revision;
       readback = await request('GET', '/api/config');
       assert.equal(readback.body.capture.device.heimdall.gain, gain,
@@ -141,6 +163,19 @@ function profile(name, type) {
         'Settings API must agree with raw YAML');
       assert.equal((await request('GET', '/api/config/capabilities')).body.setupRequired, false);
     }
+    const retune = profile('config-kraken.yml', 'Kraken');
+    retune.capture.fc += 1000000;
+    retune.capture.device.heimdall.gain = 'keep';
+    const commandStart = suiteCommands.length;
+    const retuned = await request('PUT', '/api/config?restart=false', retune,
+      {'X-VectorWarp-Receiver-Sync': 'synchronize-v1'});
+    assert.equal(retuned.status, 200, JSON.stringify(retuned.body));
+    assert.deepEqual(suiteCommands.slice(commandStart), ['get_scanner_status', 'set_frequency', 'reset_lag_compensation']);
+    assert.equal(retuned.body.receiverSync.operations[0].fullRecalibration.completed, true);
+    assert.equal(retuned.body.receiverSync.calibrationVerified, false);
+    assert.equal(retuned.body.receiverSync.hardwareVerified, false);
+    assert.equal(yaml.load(fs.readFileSync(filename, 'utf8')).capture.fc, retune.capture.fc);
+    revision = retuned.body.revision;
     child.kill('SIGTERM');
     await new Promise(resolve => child.once('exit', resolve));
     child = spawn(process.execPath, [path.join(__dirname, 'server.js'), filename], {stdio: ['ignore', 'ignore', 'pipe'],

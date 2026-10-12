@@ -6,7 +6,7 @@ class VectorwarpHeimdall < Formula
   homepage "https://github.com/krakenrf/krakensdr_suite"
   url "@SOURCE_URL@"
   sha256 "@SOURCE_SHA256@"
-  version "2026.09.18-macos-dev"
+  version "2026.10.11-macos-dev"
   revision @FORMULA_REVISION@
 
   depends_on :macos
@@ -19,8 +19,8 @@ class VectorwarpHeimdall < Formula
   depends_on "libusb"
 
   resource "suite" do
-    url "https://codeload.github.com/krakenrf/krakensdr_suite/tar.gz/a541354bc4fa02261cb521d98937842591e8ce27"
-    sha256 "acaa914e816fcb0eee4984806d53e70d10e37dab23dae1cb15a505ff8476b46a"
+    url "https://codeload.github.com/krakenrf/krakensdr_suite/tar.gz/f648514df41d90efd89984edad8b83c3680167f5"
+    sha256 "3c398220f360250a66a0ee3c6e032c65110c2ff3ea9fa17cb4b1c088af5be663"
   end
   resource "rtlsdr" do
     url "https://codeload.github.com/krakenrf/librtlsdr/tar.gz/08fb08165ecfcdd954c7a20cb1bbfbc159294f0e"

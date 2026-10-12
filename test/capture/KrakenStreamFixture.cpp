@@ -22,9 +22,10 @@ void le_float(std::vector<uint8_t>& out, float value) {
   for (int shift : {0, 8, 16, 24}) out.push_back((bits >> shift) & 255);
 }
 std::vector<uint8_t> frame(unsigned channels = 5, unsigned counter = 0,
-    unsigned phase = 4, float frequency = 527000000.0F, float gain = 15.0F) {
+    unsigned phase = 4, float frequency = 527000000.0F, float gain = 15.0F,
+    unsigned noise = 0, unsigned retuning = 0) {
   std::vector<uint8_t> out;
-  for (uint32_t word : {0x4d434851u, channels, 8u, phase, 0u, counter, 0u, 0u}) be(out, word);
+  for (uint32_t word : {0x4d434851u, channels, 8u, phase, noise, counter, 0u, retuning}) be(out, word);
   for (unsigned ch = 0; ch < channels; ++ch) { le_float(out, frequency); le_float(out, gain); }
   for (unsigned ch = 0; ch < channels; ++ch)
     for (unsigned sample = 0; sample < 8; ++sample) {
@@ -92,6 +93,19 @@ int main() {
   { Capture c; c.send_bytes({'x', 'M', 'x'}); c.send_bytes(frame(), true); c.finish(); c.length(8); }
   { Capture c; c.send_bytes(frame()); c.send_bytes(frame(5, 1)); c.send_bytes(frame(5, 1)); c.finish(); c.length(16); }
   { Capture c; c.send_bytes(frame()); c.send_bytes(frame(5, 0, 0)); c.send_bytes(frame()); c.finish(); c.length(8); }
+  // Latest Suite tags non-coherent streams even when the low calibration byte
+  // happens to be CALIBRATED.  They must create a discontinuity and never be
+  // appended to the coherent passive-radar buffers.
+  for (unsigned nonCoherent : {0x400u, 0x800u}) {
+    Capture c; c.send_bytes(frame()); c.send_bytes(frame(5, 0, 4 | nonCoherent));
+    c.send_bytes(frame()); c.finish(); c.length(8);
+  }
+  // Active calibration noise and an in-progress retune also delimit an input
+  // epoch; following coherent payload may resume only after buffers reset.
+  { Capture c; c.send_bytes(frame()); c.send_bytes(frame(5, 0, 4, 527000000.0F, 15.0F, 1));
+    c.send_bytes(frame()); c.finish(); c.length(8); }
+  { Capture c; c.send_bytes(frame()); c.send_bytes(frame(5, 0, 4, 527000000.0F, 15.0F, 0, 1));
+    c.send_bytes(frame()); c.finish(); c.length(8); }
   { Capture c; c.send_bytes(frame()); auto partial = frame(); partial.resize(83);
     c.send_bytes(partial); c.disconnect(); c.accept_next(); c.send_bytes(frame(), true); c.finish(); c.length(8); }
   for (float value : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
@@ -101,5 +115,5 @@ int main() {
     { Capture c; c.send_bytes(frame(5, 0, 4, 527000000.0F, value));
       assert(c.finish(false).find("gain metadata") != std::string::npos); c.length(0); }
   }
-  std::cout << "Kraken actual socket capture: 10 loopback cases passed (fragmentation/resync, retune, calibration loss, partial disconnect/reconnect, six nonfinite faults). No SDR opened.\n";
+  std::cout << "Kraken actual socket capture: 14 loopback cases passed (fragmentation/resync, calibration/noise/retune/noncoherent loss, partial disconnect/reconnect, six nonfinite faults). No SDR opened.\n";
 }

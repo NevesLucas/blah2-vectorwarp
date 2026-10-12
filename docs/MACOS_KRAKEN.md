@@ -88,13 +88,14 @@ driver with no USB dependency. It exercises native capture, calibration,
 known channel phase/gain errors, control changes and shutdown. It does not
 qualify physical USB bandwidth, sample-clock drift, power stability, antenna
 signals or real Kraken calibration. Hardware acceptance remains a separate
-step after connecting the powered receiver. A separate physical run on the
+step after connecting the powered receiver. A separate physical run against
+the earlier Suite source `a541354bc4fa02261cb521d98937842591e8ce27` on the
 Apple M2 development host passed internal-noise calibration, five-channel
 2.4-MS/s capture, frequency/gain changes and clean restart/shutdown. The local
 Homebrew app and companion were installed and tested through revision 17; see
 [MACOS_TEST_MATRIX.md](MACOS_TEST_MATRIX.md) for the tested duration and limits.
 External antenna/RF coherence and physical interruption recovery remain unqualified.
-The [macOS CI run](https://github.com/mickeyslaven/blah2-VectorWarp/actions/runs/35400739948)
+For that earlier Suite source, the [macOS CI run](https://github.com/mickeyslaven/blah2-VectorWarp/actions/runs/35400739948)
 passed the source build and simulated native checks on Apple Silicon and Intel,
 plus the installed Homebrew pipeline on ARM. CI does not establish physical
 Intel receiver behavior; local runs only qualify the architecture actually used.
@@ -102,8 +103,10 @@ Intel receiver behavior; local runs only qualify the architecture actually used.
 ## Source provenance
 
 `config/kraken-macos-sources.json` pins Suite commit
-`a541354bc4fa02261cb521d98937842591e8ce27`, Kraken RTL-SDR commit
+`f648514df41d90efd89984edad8b83c3680167f5`, Kraken RTL-SDR commit
 `08fb08165ecfcdd954c7a20cb1bbfbc159294f0e`, uWebSockets and uSockets.
+See the [October 2026 compatibility record](KRAKEN_SUITE_UPDATE_2026_10.md)
+for changed calibration behavior and the software checks for this revision.
 The build installs dependency license files supplied upstream. The pinned
 Suite repository has no repository-wide license file; its code is not
 relicensed under VectorWarp's MIT license. These development formulas build
