@@ -1,11 +1,11 @@
 # macOS verification and remaining hardware coverage
 
 The [October 2026 Kraken Suite update](KRAKEN_SUITE_UPDATE_2026_10.md) uses
-upstream `f648514df41d` and the reviewed companion patches. Head `ca8cbadb` passed
-24 hosted software checks with three intentional publication skips, including
-all seven native simulation cases on Mac arm64/x86_64 and Linux x86_64/ARM64.
-These results predate the subsequent VectorWarp AUTO command-sequence change;
-that client change needs its own hosted qualification.
+upstream `f648514df41d` and the reviewed companion patches. Revision
+`50548a3554d4`, including the AUTO command-sequence change, passed all 24 hosted
+checks with three intentional publication skips. Coverage includes all seven
+native simulation cases on Mac arm64/x86_64 and Linux x86_64/ARM64, both
+standalone Mac runtimes, CPU/API checks and all 11 Linux package targets.
 
 The local M2 subsequently passed bounded five-channel USB/manual settings and
 CPU/API tests. With the new antenna array connected as reported by the user,
@@ -15,8 +15,20 @@ calibration timing change was adopted. The subsequent actual Node control-client
 test also passed manual-to-AUTO gain and AUTO retuning with fresh five-channel
 output, followed by complete cleanup. This is finite control/native USB evidence;
 it is not a new browser/HTTP/CPU/GPU run or a measurement of external RF coherence,
-antenna geometry, long-term drift or physical Linux/Intel Mac hardware.
-Historical results below apply to their recorded revisions.
+antenna geometry, long-term drift or physical Intel Mac hardware.
+
+A separate Fedora 44 x86_64 five-channel USB test of pristine upstream Suite and
+the actual Node client passed AUTO, Keep-gain retuning, unchanged-setting no-op,
+an original periodic check and manual restoration. All five original USB kernel
+driver bindings were restored, and the evidence passed independent review. The
+current HP CPU build and dependency audit also passed independent review. A
+subsequent live CPU/API test passed five settings/lifecycle stages with fresh
+finite maps, new API/CPU identities after restart, matching loaded revisions and
+complete cleanup; the evidence passed independent review. That single-worker CPU
+test reported dropped packets and processing times exceeding the requested CPI,
+so it is functional evidence, not lossless, real-time or full multi-worker
+performance. See the linked update note for scope and measurements. Historical
+results below apply to their recorded revisions.
 
 Standalone installer development is separate from the accepted Homebrew/source
 matrix below. Local Apple Silicon testing has verified relocation of 142 native

@@ -112,6 +112,16 @@ check. The user reported the new antenna array connected. That result supports
 the command sequence. A subsequent bounded physical test of the actual Node
 synchronizer passed manual-to-AUTO gain and AUTO retuning with gain Keep,
 independently observed fresh recovery and five-channel output, and complete
-shutdown. It does not establish browser/HTTP or CPU/GPU performance, external RF
-coherence or physical Linux/Intel Mac behavior. No native calibration timing
-patch was adopted.
+shutdown. A separate Fedora 44 x86_64 USB test of pristine upstream Suite and
+the same client passed AUTO, Keep-gain retuning, unchanged-setting no-op, the
+original periodic check and manual restoration, with all five kernel-driver
+bindings restored. The Linux native/control evidence passed independent review;
+the current HP CPU build and dependency audit also passed independent review.
+A subsequent live HP CPU/API test passed initial acquisition, two Save & Restart
+settings changes, stop/start and restart, with fresh finite maps and complete
+cleanup and independent acceptance. This used one surveillance worker and one
+FFT thread; dropped packets and CPI overruns were observed. It establishes bounded
+functional behavior, not lossless or real-time throughput, full multi-worker/GPU
+performance, external RF coherence, long-term drift or physical Intel Mac behavior. No native calibration timing patch was
+adopted. The exact current hosted and physical scope is recorded in
+[the October update note](../../../docs/KRAKEN_SUITE_UPDATE_2026_10.md).

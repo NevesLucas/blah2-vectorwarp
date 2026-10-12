@@ -73,11 +73,16 @@ updated companion and current source API/lifecycle with the existing installed
 Homebrew revision 17 processor. The new frame-decoder changes were compiled and
 tested separately; the full processor was not rebuilt for this local check.
 
-Compatibility revision `ca8cbadb` passed 24 hosted checks, including native
-simulations on Linux x86_64/ARM64 and macOS arm64/x86_64, both standalone Mac
-runtimes and all 11 Linux package targets. Three publication jobs intentionally
-skipped the draft PR. Those results predate the VectorWarp AUTO command change;
-that change requires its own hosted qualification.
+Revision `50548a3554d4`, including the VectorWarp AUTO command sequence, passed
+all 24 hosted checks. These include Linux x86_64/ARM64 native simulations and
+CPU/API tests, macOS arm64/x86_64 builds and standalone runtimes, and all 11 Linux
+package targets. Three publication jobs intentionally skipped the draft PR.
+See the [CPU/API and native checks](https://github.com/mickeyslaven/blah2-VectorWarp/actions/runs/38203415283),
+[Mac checks](https://github.com/mickeyslaven/blah2-VectorWarp/actions/runs/38203415309),
+[standalone runtimes](https://github.com/mickeyslaven/blah2-VectorWarp/actions/runs/38203415289),
+[Linux packages](https://github.com/mickeyslaven/blah2-VectorWarp/actions/runs/38203415320)
+and [Homebrew policy](https://github.com/mickeyslaven/blah2-VectorWarp/actions/runs/38203415330).
+These PR results do not publish packages or establish release availability.
 
 The receiver-update catalog acknowledges this reviewed source identity. As with
 other catalog entries, that acknowledgement is not a hardware compatibility
@@ -107,10 +112,41 @@ manual restoration and all-channel shutdown passed. The API test suite also
 passed, including the new recovery protocol cases. This exercised the control
 client directly, not a browser/HTTP session or a new CPU/GPU radar run.
 
-These results do not establish AUTO convergence without a reset,
-external RF coherence after switching back to the antennas, antenna geometry,
-bearing/target accuracy, long-term drift or physical Linux/Intel Mac behavior.
-Full hardware acceptance and user approval remain required before merge/release.
+A subsequent 47-second Fedora 44 x86_64 test used pristine upstream Suite at the
+same pinned revision and the actual VectorWarp Node client with five USB channels.
+Manual-to-AUTO and retuning with gain Keep each completed in 5.52 seconds, with
+observed recovery followed by newly received valid five-channel frames. Unchanged
+settings issued no setting writes. The original periodic check completed in
+1.42 seconds and logged worst phase/lag values of 2.2 degrees and zero samples.
+Manual restoration, receiver exit and all five original kernel-driver bindings
+were verified; no raw IQ was saved. This Linux native/control evidence passed
+independent review. The current HP CPU and capture-core build also passed
+independent artifact/dependency review.
+
+A separate 55-second live HP test then passed all five controller-to-CPU-to-API
+stages: initial manual 527 MHz/40 dB, Save & Restart at 528 MHz/20 dB, restoration
+to 527 MHz/40 dB, stop/start, and restart. Every stage produced fresh finite map
+output. Restarts changed both API and CPU process identities, and the API loaded
+the saved configuration revision. Noise was disabled, the native receiver exited
+successfully, all five original kernel-driver bindings were restored, and no
+owned radio processes remained. No raw IQ was saved. This final pipeline evidence
+passed independent review.
+
+This live pipeline used one surveillance worker, one FFT thread and a 200 ms CPI.
+The native log reported 69 dropped packets across three reports; the processor
+logged two frequency mismatches at handover. The 28 measured CPI processing times
+ranged from 397.7 to
+560.0 ms (median 430.4 ms). This is bounded functional processing and restart
+evidence, not lossless or real-time throughput, full multi-worker performance or
+GPU qualification.
+
+These finite tests do not establish AUTO convergence without a reset, external
+RF coherence after switching back to the antennas, antenna geometry,
+bearing/target accuracy, long-term drift, or physical Intel Mac behavior. Stock
+Linux status does not provide the companion's acquisition epoch or all of its
+calibration fields; the control receipt does not claim measured calibration or
+hardware verification. These directed hardware results passed review; final
+exact-tree and release acceptance remain pending.
 The fake driver has no USB implementation. Linux tests first compile the real
 static-driver target without executing it, then explicitly relink native objects
 with the fake driver and verify hashes, link maps and loader dependencies before
